@@ -270,6 +270,9 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
             }
         }
         self.refresh_entity_hits();
+        if let Err(e) = self.save_chapter() {
+            self.last_error = Some(format!("save: {e}"));
+        }
     }
 
     pub fn dismiss_revision(&mut self, id: u32) {
