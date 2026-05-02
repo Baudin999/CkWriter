@@ -27,6 +27,8 @@ struct OllamaChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    /// Disable reasoning on thinking-capable models. We want JSON, not chain-of-thought.
+    think: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<&'a str>,
     options: OllamaOptions,
@@ -38,6 +40,8 @@ struct OllamaOptions {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +66,10 @@ struct OllamaChatChunk {
 struct ChunkMessage {
     #[serde(default)]
     content: String,
+    /// Reasoning tokens from thinking-capable models. Captured for diagnostics
+    /// only — we do not surface them to the editor.
+    #[serde(default)]
+    thinking: String,
 }
 
 #[derive(Debug, Clone)]
@@ -147,10 +155,12 @@ fn run_stream(
         model,
         messages,
         stream: true,
+        think: false,
         format: if json_mode { Some("json") } else { None },
         options: OllamaOptions {
             temperature: Some(0.4),
             num_ctx: Some(8192),
+            num_predict: Some(2048),
         },
     };
 
@@ -178,6 +188,7 @@ fn run_stream(
     let reader = BufReader::new(resp);
     let mut tokens = 0usize;
     let mut bytes_out = 0usize;
+    let mut thinking_bytes = 0usize;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -199,6 +210,7 @@ fn run_stream(
                     let _ = tx.send(StreamEvent::Error(err));
                 }
                 if let Some(m) = chunk.message {
+                    thinking_bytes += m.thinking.len();
                     if !m.content.is_empty() {
                         tokens += 1;
                         bytes_out += m.content.len();
@@ -207,7 +219,7 @@ fn run_stream(
                 }
                 if chunk.done {
                     log::info!(
-                        "ollama done in {:?}: tokens={tokens} bytes={bytes_out} done_reason={:?} prompt_eval={:?} eval={:?} server_total_ns={:?}",
+                        "ollama done in {:?}: tokens={tokens} bytes={bytes_out} thinking_bytes={thinking_bytes} done_reason={:?} prompt_eval={:?} eval={:?} server_total_ns={:?}",
                         start.elapsed(),
                         chunk.done_reason,
                         chunk.prompt_eval_count,
@@ -215,10 +227,16 @@ fn run_stream(
                         chunk.total_duration,
                     );
                     if bytes_out == 0 {
-                        log::warn!(
-                            "ollama returned empty response: model may have failed to produce JSON, or num_ctx={} was too small for prompt_bytes={prompt_bytes}",
-                            8192
-                        );
+                        if thinking_bytes > 0 {
+                            log::warn!(
+                                "ollama returned thinking_bytes={thinking_bytes} but zero content -- think=false should have suppressed this"
+                            );
+                        } else {
+                            log::warn!(
+                                "ollama returned empty response: model may have failed to produce JSON, or num_ctx={} was too small for prompt_bytes={prompt_bytes}",
+                                8192
+                            );
+                        }
                     }
                     let _ = tx.send(StreamEvent::Done);
                     return Ok(());

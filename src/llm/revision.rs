@@ -48,21 +48,67 @@ pub enum RevisionStatus {
 }
 
 pub fn parse_voice(buf: &str) -> Option<RawVoice> {
-    let s = strip_code_fence(buf);
-    serde_json::from_str(&s).ok()
+    parse_json_obj(buf, "voice")
 }
 
 pub fn parse_flags_only(buf: &str) -> Option<RawFlagsOnly> {
-    let s = strip_code_fence(buf);
-    serde_json::from_str(&s).ok()
+    parse_json_obj(buf, "flags")
 }
 
-fn strip_code_fence(s: &str) -> String {
-    let t = s.trim();
-    let t = t.strip_prefix("```json").unwrap_or(t);
-    let t = t.strip_prefix("```").unwrap_or(t);
-    let t = t.strip_suffix("```").unwrap_or(t);
-    t.trim().to_string()
+fn parse_json_obj<T: for<'de> serde::Deserialize<'de>>(buf: &str, label: &str) -> Option<T> {
+    let extracted = extract_json_object(buf);
+    match serde_json::from_str::<T>(extracted) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            log::warn!(
+                "{label} parse failed at line {} col {}: {e}; raw response ({} bytes): {}",
+                e.line(),
+                e.column(),
+                buf.len(),
+                preview(buf, 800)
+            );
+            None
+        }
+    }
+}
+
+/// Extract the first balanced `{...}` block. Tolerates code fences, leading/trailing
+/// commentary, and stray whitespace. Falls back to the trimmed input if no `{` is found.
+fn extract_json_object(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let Some(start) = bytes.iter().position(|&b| b == b'{') else {
+        return s.trim();
+    };
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_str => escape = true,
+            b'"' => in_str = !in_str,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return &s[start..=i];
+                }
+            }
+            _ => {}
+        }
+    }
+    &s[start..]
+}
+
+fn preview(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.replace('\n', "\\n")
+    } else {
+        format!("{}…[+{} bytes]", s[..max].replace('\n', "\\n"), s.len() - max)
+    }
 }
 
 /// Locate `quote` inside `text`. Returns the first byte-offset match. Quote-anchoring
