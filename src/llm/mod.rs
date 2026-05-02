@@ -101,7 +101,9 @@ pub fn chat_stream(
 
     let join = thread::spawn(move || {
         if let Err(e) = run_stream(&url, &model_owned, &messages, json_mode, &tx) {
-            let _ = tx.send(StreamEvent::Error(format!("{e:#}")));
+            let msg = format!("{e:#}");
+            log::error!("ollama chat_stream failed: {msg}");
+            let _ = tx.send(StreamEvent::Error(msg));
             let _ = tx.send(StreamEvent::Done);
         }
     });
@@ -122,6 +124,13 @@ fn run_stream(
     json_mode: bool,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<()> {
+    let start = std::time::Instant::now();
+    let prompt_bytes: usize = messages.iter().map(|m| m.content.len()).sum();
+    log::info!(
+        "ollama request -> {url} model={model} messages={} prompt_bytes={prompt_bytes} json_mode={json_mode}",
+        messages.len()
+    );
+
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()?;
@@ -137,30 +146,62 @@ fn run_stream(
         },
     };
 
-    let resp = client.post(url).json(&body).send()?;
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let resp = match client.post(url).json(&body).send() {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!(
+                "ollama send failed after {:?}: {e}",
+                start.elapsed()
+            );
+            return Err(e.into());
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
         let txt = resp.text().unwrap_or_default();
+        log::error!(
+            "ollama HTTP {status} after {:?}: {txt}",
+            start.elapsed()
+        );
         anyhow::bail!("ollama HTTP {status}: {txt}");
     }
+    log::debug!("ollama HTTP {status}, streaming...");
 
     let reader = BufReader::new(resp);
+    let mut tokens = 0usize;
+    let mut bytes_out = 0usize;
     for line in reader.lines() {
-        let line = line?;
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!(
+                    "ollama stream read failed after {:?} (tokens={tokens} bytes={bytes_out}): {e}",
+                    start.elapsed()
+                );
+                return Err(e.into());
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<OllamaChatChunk>(&line) {
             Ok(chunk) => {
                 if let Some(err) = chunk.error {
+                    log::error!("ollama returned error chunk after {:?}: {err}", start.elapsed());
                     let _ = tx.send(StreamEvent::Error(err));
                 }
                 if let Some(m) = chunk.message {
                     if !m.content.is_empty() {
+                        tokens += 1;
+                        bytes_out += m.content.len();
                         let _ = tx.send(StreamEvent::Token(m.content));
                     }
                 }
                 if chunk.done {
+                    log::info!(
+                        "ollama done in {:?}: tokens={tokens} bytes={bytes_out}",
+                        start.elapsed()
+                    );
                     let _ = tx.send(StreamEvent::Done);
                     return Ok(());
                 }
@@ -170,6 +211,10 @@ fn run_stream(
             }
         }
     }
+    log::warn!(
+        "ollama stream ended without done marker after {:?} (tokens={tokens} bytes={bytes_out})",
+        start.elapsed()
+    );
     let _ = tx.send(StreamEvent::Done);
     Ok(())
 }

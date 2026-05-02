@@ -3,6 +3,7 @@ mod book;
 mod extract;
 mod import;
 mod llm;
+mod logging;
 mod pdf;
 mod scope;
 mod settings;
@@ -13,7 +14,7 @@ mod ui;
 use app::CkWriterApp;
 
 fn main() -> eframe::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    logging::init();
 
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
