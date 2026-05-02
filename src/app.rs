@@ -1386,7 +1386,7 @@ fn preview_for_log(s: &str, max: usize) -> String {
         escaped
     } else {
         let mut out: String = escaped.chars().take(max).collect();
-        out.push_str("…");
+        out.push('…');
         out
     }
 }
