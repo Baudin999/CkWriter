@@ -1,5 +1,6 @@
 mod app;
 mod book;
+mod diff;
 mod extract;
 mod import;
 mod index;

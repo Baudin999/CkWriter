@@ -122,6 +122,23 @@ pub struct CkWriterApp {
     /// way to position wrapped LaTeX paragraphs (line-counting on `\n` is
     /// wildly wrong because one source line wraps to many visual rows).
     pub pending_scroll_to_cursor: bool,
+
+    /// When true, the central panel renders the diff view (HEAD baseline on
+    /// the left, editable buffer on the right) instead of the plain editor.
+    /// Mutually exclusive with `read_mode` — toggling either off the other.
+    pub diff_mode: bool,
+    /// Cached `git show HEAD:<path>` content for the chapter named in
+    /// `diff_baseline_chapter`. Re-loaded when the chapter changes.
+    pub diff_baseline: Option<String>,
+    pub diff_baseline_chapter: Option<PathBuf>,
+    /// Set when baseline lookup ran but produced no usable text (untracked
+    /// file, no repo, git error). The view shows this string instead of a
+    /// diff so the user understands why nothing rendered.
+    pub diff_baseline_error: Option<String>,
+    /// Shared vertical scroll offset for the side-by-side diff. Both columns
+    /// render at this offset and write their post-scroll state back, so a
+    /// wheel turn in either column moves both in lockstep.
+    pub diff_scroll_y: f32,
 }
 
 impl CkWriterApp {
@@ -187,6 +204,11 @@ impl CkWriterApp {
             pending_scroll_offset: None,
             pending_cursor_char: None,
             pending_scroll_to_cursor: false,
+            diff_mode: false,
+            diff_baseline: None,
+            diff_baseline_chapter: None,
+            diff_baseline_error: None,
+            diff_scroll_y: 0.0,
         };
         if let Some(p) = app.settings.last_book.clone() {
             if p.exists() {
@@ -319,6 +341,10 @@ impl CkWriterApp {
                 self.revisions.clear();
                 self.selected_revision = None;
                 self.last_error = None;
+                self.diff_baseline = None;
+                self.diff_baseline_chapter = None;
+                self.diff_baseline_error = None;
+                self.diff_scroll_y = 0.0;
                 self.settings.last_chapter = Some(path.to_path_buf());
                 let _ = self.settings.save();
                 self.load_notes();
@@ -339,6 +365,38 @@ impl CkWriterApp {
         // chapter's edits are reflected in the inspector's "Appears in" list.
         self.rebuild_char_index();
         Ok(())
+    }
+
+    /// Lazily load the `HEAD` baseline for the current chapter. Cached by
+    /// chapter file path; cleared by `open_chapter`. Idempotent — safe to
+    /// call every frame from the diff view.
+    pub fn ensure_diff_baseline(&mut self) {
+        let Some(ch) = self.current_chapter.as_ref() else {
+            self.diff_baseline = None;
+            self.diff_baseline_chapter = None;
+            self.diff_baseline_error = None;
+            return;
+        };
+        if self.diff_baseline_chapter.as_deref() == Some(ch.file_path.as_path()) {
+            return;
+        }
+        let path = ch.file_path.clone();
+        match crate::diff::head_baseline(&path) {
+            Ok(Some(text)) => {
+                self.diff_baseline = Some(text);
+                self.diff_baseline_error = None;
+            }
+            Ok(None) => {
+                self.diff_baseline = None;
+                self.diff_baseline_error =
+                    Some("no HEAD baseline (file is untracked or new)".into());
+            }
+            Err(e) => {
+                self.diff_baseline = None;
+                self.diff_baseline_error = Some(format!("git: {e}"));
+            }
+        }
+        self.diff_baseline_chapter = Some(path);
     }
 
     pub fn refresh_entity_hits(&mut self) {
@@ -1497,6 +1555,8 @@ impl App for CkWriterApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.read_mode {
                 ui::pdf_view::show(self, ui);
+            } else if self.diff_mode {
+                ui::diff_view::show(self, ui);
             } else {
                 ui::editor::show(self, ui);
             }

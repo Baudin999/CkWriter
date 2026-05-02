@@ -37,6 +37,10 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 .clicked()
             {
                 app.read_mode = !app.read_mode;
+                if app.read_mode {
+                    // Read and Diff are mutually exclusive central-panel modes.
+                    app.diff_mode = false;
+                }
                 if app.read_mode && app.pdf_meta.is_none() && !app.pdf_building {
                     let pdf = app
                         .book
@@ -46,6 +50,19 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                     if pdf {
                         app.open_existing_pdf();
                     }
+                }
+            }
+            ui.separator();
+            let diff_label = if app.diff_mode { "Edit" } else { "Diff" };
+            let diff_enabled =
+                app.book.is_some() && app.current_chapter.is_some() && !app.read_mode;
+            if ui
+                .add_enabled(diff_enabled, egui::Button::new(diff_label))
+                .clicked()
+            {
+                app.diff_mode = !app.diff_mode;
+                if app.diff_mode {
+                    app.ensure_diff_baseline();
                 }
             }
             ui.separator();

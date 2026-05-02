@@ -1,3 +1,4 @@
+pub mod diff_view;
 pub mod editor;
 pub mod file_tree;
 pub mod inspector;

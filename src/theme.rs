@@ -18,6 +18,10 @@ pub const REVISION_PUNCTUATION: Color32 = Color32::from_rgb(0xf7, 0xa8, 0x6a);
 pub const REVISION_GRAMMAR: Color32 = Color32::from_rgb(0xa8, 0xc8, 0x7a);
 pub const REVISION_SELECTED_BG: Color32 = Color32::from_rgb(0x33, 0x2c, 0x2c);
 
+pub const DIFF_REMOVED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
+pub const DIFF_INSERTED: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
+pub const DIFF_CHANGED: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
+
 pub const WRITER_FAMILY: &str = "writer";
 
 const IA_WRITER_DIR: &str = "/usr/share/fonts/ttf-ia-writer";
