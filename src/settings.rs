@@ -1,6 +1,17 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ChapterPlace {
+    /// Char-index of the cursor (egui TextEdit uses char positions, not bytes).
+    #[serde(default)]
+    pub cursor: usize,
+    /// Vertical scroll offset of the editor's ScrollArea, in pixels.
+    #[serde(default)]
+    pub scroll: f32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -20,6 +31,12 @@ pub struct Settings {
     pub last_book: Option<PathBuf>,
     #[serde(default)]
     pub last_chapter: Option<PathBuf>,
+    /// For each book root, the directory paths the user had expanded last time.
+    #[serde(default)]
+    pub expanded_dirs: HashMap<PathBuf, Vec<PathBuf>>,
+    /// For each chapter file, where the cursor was and how far the editor was scrolled.
+    #[serde(default)]
+    pub chapter_places: HashMap<PathBuf, ChapterPlace>,
 }
 
 fn default_model() -> String {
@@ -29,7 +46,7 @@ fn default_ollama_url() -> String {
     "http://localhost:11434".into()
 }
 fn default_font_size() -> f32 {
-    16.0
+    18.0
 }
 fn default_left_panel_width() -> f32 {
     260.0
@@ -49,6 +66,8 @@ impl Default for Settings {
             right_panel_width: default_right_panel_width(),
             last_book: None,
             last_chapter: None,
+            expanded_dirs: HashMap::new(),
+            chapter_places: HashMap::new(),
         }
     }
 }

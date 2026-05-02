@@ -1,9 +1,11 @@
 pub mod entity;
 pub mod latex;
+pub mod tree;
 
 use anyhow::{anyhow, Result};
 use entity::{Entities, Entity, EntityKind};
 use std::path::{Path, PathBuf};
+use tree::FileNode;
 
 #[derive(Debug, Clone)]
 pub struct Chapter {
@@ -11,7 +13,6 @@ pub struct Chapter {
     pub include_path: String,
     pub file_path: PathBuf,
     pub display_title: String,
-    pub group: String,
     pub in_manuscript: bool,
 }
 
@@ -20,6 +21,7 @@ pub struct Book {
     #[allow(dead_code)]
     pub main_tex: PathBuf,
     pub chapters: Vec<Chapter>,
+    pub file_tree: FileNode,
     pub entities: Entities,
     pub voice_prompt: String,
     pub roadmap: String,
@@ -80,12 +82,10 @@ impl Book {
         for inc in &included {
             let file = root.join(format!("{inc}.tex"));
             let title = read_chapter_title(&file).unwrap_or_else(|| inc.clone());
-            let group = group_of(inc);
             chapters.push(Chapter {
                 include_path: inc.clone(),
                 file_path: file,
                 display_title: title,
-                group,
                 in_manuscript: true,
             });
         }
@@ -107,7 +107,6 @@ impl Book {
                             include_path: inc.clone(),
                             file_path: p,
                             display_title: title,
-                            group: sub.to_string(),
                             in_manuscript: false,
                         });
                     }
@@ -121,10 +120,13 @@ impl Book {
             std::fs::read_to_string(root.join(&config.voice_prompt_file)).unwrap_or_default();
         let roadmap = std::fs::read_to_string(root.join(&config.roadmap_file)).unwrap_or_default();
 
+        let file_tree = FileNode::build(root);
+
         Ok(Self {
             root: root.to_path_buf(),
             main_tex,
             chapters,
+            file_tree,
             entities,
             voice_prompt,
             roadmap,
@@ -171,12 +173,4 @@ fn load_config(root: &Path) -> BookConfig {
 fn read_chapter_title(path: &Path) -> Option<String> {
     let txt = std::fs::read_to_string(path).ok()?;
     latex::extract_chapter_title(&txt)
-}
-
-fn group_of(include_path: &str) -> String {
-    include_path
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_string()
 }

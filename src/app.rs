@@ -10,7 +10,7 @@ use crate::settings::Settings;
 use crate::theme;
 use crate::ui;
 use eframe::App;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -39,6 +39,8 @@ pub struct CkWriterApp {
 
     pub show_book_picker: bool,
     pub picker_path: String,
+    /// Directory paths currently expanded in the file tree sidebar.
+    pub expanded_dirs: HashSet<PathBuf>,
     pub show_settings: bool,
     pub settings_dirty: bool,
     pub last_settings_save: f64,
@@ -57,6 +59,12 @@ pub struct CkWriterApp {
     pub pdf_error: Option<String>,
     pub pdf_dpi: u32,
     pub pending_scroll_line: Option<usize>,
+    /// One-shot: pixel offset to apply to the editor ScrollArea on the next frame
+    /// (used to restore the saved reading position when re-opening a chapter).
+    pub pending_scroll_offset: Option<f32>,
+    /// One-shot: char index to install into the editor's TextEditState on the
+    /// next frame (used to restore the saved cursor when re-opening a chapter).
+    pub pending_cursor_char: Option<usize>,
 }
 
 impl CkWriterApp {
@@ -84,6 +92,7 @@ impl CkWriterApp {
             available_models: Vec::new(),
             show_book_picker: false,
             picker_path: String::new(),
+            expanded_dirs: HashSet::new(),
             show_settings: false,
             settings_dirty: false,
             last_settings_save: 0.0,
@@ -100,6 +109,8 @@ impl CkWriterApp {
             pdf_error: None,
             pdf_dpi: 144,
             pending_scroll_line: None,
+            pending_scroll_offset: None,
+            pending_cursor_char: None,
         };
         if let Some(p) = app.settings.last_book.clone() {
             if p.exists() {
@@ -124,6 +135,22 @@ impl CkWriterApp {
     pub fn open_book(&mut self, root: &Path) -> anyhow::Result<()> {
         let book = Book::open(root)?;
         let matcher = EntityMatcher::build(&book.entities);
+        self.expanded_dirs.clear();
+        match self.settings.expanded_dirs.get(&book.root) {
+            Some(saved) if !saved.is_empty() => {
+                self.expanded_dirs.extend(saved.iter().cloned());
+            }
+            _ => {
+                // First-time open: pre-expand top-level dirs so the sidebar isn't
+                // a wall of collapsed folders.
+                self.expanded_dirs.insert(book.root.clone());
+                for child in &book.file_tree.children {
+                    if child.is_dir {
+                        self.expanded_dirs.insert(child.path.clone());
+                    }
+                }
+            }
+        }
         self.book = Some(book);
         self.matcher = Some(matcher);
         self.current_chapter = None;
@@ -163,6 +190,13 @@ impl CkWriterApp {
             Ok(text) => {
                 self.editor_text = text;
                 self.dirty = false;
+                if let Some(place) = self.settings.chapter_places.get(path) {
+                    self.pending_cursor_char = Some(place.cursor);
+                    self.pending_scroll_offset = Some(place.scroll);
+                } else {
+                    self.pending_cursor_char = None;
+                    self.pending_scroll_offset = None;
+                }
                 if let Some(book) = &self.book {
                     self.current_chapter = book.chapter_by_path(path).cloned().or_else(|| {
                         Some(Chapter {
@@ -177,7 +211,6 @@ impl CkWriterApp {
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("Untitled")
                                 .to_string(),
-                            group: String::new(),
                             in_manuscript: false,
                         })
                     });
@@ -589,7 +622,7 @@ impl App for CkWriterApp {
             .default_width(self.settings.left_panel_width)
             .resizable(true)
             .show(ctx, |ui| {
-                ui::chapter_list::show(self, ui);
+                ui::file_tree::show(self, ui);
             });
         let lw = left_resp.response.rect.width();
         if (lw - self.settings.left_panel_width).abs() > 1.0 {

@@ -23,7 +23,7 @@ cat > "${DESKTOP}" <<EOF
 [Desktop Entry]
 Name=CkWriter
 Comment=Local LLM-coached novel writing
-Exec=bash -c 'LOG_DIR="\${XDG_STATE_HOME:-\$HOME/.local/state}/ckwriter"; mkdir -p "\$LOG_DIR"; exec ${DEST} >>"\$LOG_DIR/ckwriter.log" 2>&1'
+Exec=${DEST}
 Terminal=false
 Type=Application
 Icon=accessories-text-editor

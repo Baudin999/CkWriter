@@ -48,6 +48,14 @@ struct OllamaChatChunk {
     done: bool,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    done_reason: Option<String>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+    #[serde(default)]
+    total_duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,9 +207,19 @@ fn run_stream(
                 }
                 if chunk.done {
                     log::info!(
-                        "ollama done in {:?}: tokens={tokens} bytes={bytes_out}",
-                        start.elapsed()
+                        "ollama done in {:?}: tokens={tokens} bytes={bytes_out} done_reason={:?} prompt_eval={:?} eval={:?} server_total_ns={:?}",
+                        start.elapsed(),
+                        chunk.done_reason,
+                        chunk.prompt_eval_count,
+                        chunk.eval_count,
+                        chunk.total_duration,
                     );
+                    if bytes_out == 0 {
+                        log::warn!(
+                            "ollama returned empty response: model may have failed to produce JSON, or num_ctx={} was too small for prompt_bytes={prompt_bytes}",
+                            8192
+                        );
+                    }
                     let _ = tx.send(StreamEvent::Done);
                     return Ok(());
                 }

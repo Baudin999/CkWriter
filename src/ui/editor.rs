@@ -4,8 +4,20 @@ use crate::extract::{self, EntityHit};
 use crate::llm::prompts::Pipeline;
 use crate::llm::revision::{Revision, RevisionStatus};
 use crate::theme;
-use egui::text::{LayoutJob, TextFormat};
-use egui::{Color32, FontId, RichText, Stroke};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
+use egui::widgets::text_edit::TextEditState;
+use egui::{Color32, FontFamily, FontId, Id, RichText, Stroke};
+
+const MAX_COLUMN_WIDTH: f32 = 760.0;
+const MIN_COLUMN_WIDTH: f32 = 360.0;
+const MIN_SIDE_PADDING: f32 = 24.0;
+const TOP_PADDING: f32 = 32.0;
+const BOTTOM_PADDING: f32 = 96.0;
+const LINE_HEIGHT_MULTIPLIER: f32 = 1.7;
+
+fn editor_family() -> FontFamily {
+    FontFamily::Name(theme::WRITER_FAMILY.into())
+}
 
 pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     if app.book.is_none() {
@@ -31,68 +43,130 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     }
 
     let font_size = app.settings.editor_font_size;
+    let line_height = (font_size * LINE_HEIGHT_MULTIPLIER).round();
+    let family = editor_family();
     let entity_hits = app.entity_hits.clone();
     let revisions: Vec<Revision> = app.revisions.clone();
     let entity_hits_for_hover = entity_hits.clone();
     let revisions_for_hover = revisions.clone();
+    let layout_family = family.clone();
 
     let mut layouter = move |ui: &egui::Ui, text: &str, wrap_width: f32| {
-        let mut job = build_job(text, font_size, &entity_hits, &revisions);
+        let mut job = build_job(
+            text,
+            font_size,
+            line_height,
+            &layout_family,
+            &entity_hits,
+            &revisions,
+        );
         job.wrap.max_width = wrap_width;
         ui.fonts(|f| f.layout_job(job))
     };
 
-    let row_height =
-        ui.fonts(|f| f.row_height(&FontId::new(font_size, egui::FontFamily::Monospace)));
-    let scroll_target = app
-        .pending_scroll_line
-        .take()
-        .map(|line| (line as f32 * row_height - row_height * 4.0).max(0.0));
+    // Pick the scroll offset for this frame: a jump-to-source line wins over a
+    // chapter-restore offset; chapter-restore is consumed otherwise. Cursor
+    // restore is only honoured if there's no jump (a jump owns the viewport).
+    let editor_id = Id::new("ckwriter-editor");
+    let scroll_target = if let Some(line) = app.pending_scroll_line.take() {
+        app.pending_scroll_offset = None;
+        app.pending_cursor_char = None;
+        Some((line as f32 * line_height - line_height * 4.0).max(0.0))
+    } else {
+        app.pending_scroll_offset.take()
+    };
+    if let Some(idx) = app.pending_cursor_char.take() {
+        let mut state = TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(idx))));
+        state.store(ui.ctx(), editor_id);
+    }
 
     let mut scroll = egui::ScrollArea::vertical().auto_shrink([false; 2]);
     if let Some(off) = scroll_target {
         scroll = scroll.vertical_scroll_offset(off);
     }
-    scroll.show(ui, |ui| {
+    let scroll_out = scroll.show(ui, |ui| {
         let avail = ui.available_size();
-        let rows = ((avail.y / row_height).floor() as usize).max(8);
+        let pad_x = (((avail.x - MAX_COLUMN_WIDTH) * 0.5).max(MIN_SIDE_PADDING)).floor();
+        let column_w = (avail.x - 2.0 * pad_x).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        let rows = ((avail.y / line_height).floor() as usize).max(8);
 
-        let edit = egui::TextEdit::multiline(&mut app.editor_text)
-            .font(FontId::new(font_size, egui::FontFamily::Monospace))
-            .desired_width(avail.x)
-            .desired_rows(rows)
-            .layouter(&mut layouter);
-        let output = edit.show(ui);
-        let response = &output.response;
+        ui.add_space(TOP_PADDING);
+        let mut cursor_char: Option<usize> = None;
+        ui.horizontal(|ui| {
+            ui.add_space(pad_x);
+            ui.vertical(|ui| {
+                let edit = egui::TextEdit::multiline(&mut app.editor_text)
+                    .id(editor_id)
+                    .font(FontId::new(font_size, family.clone()))
+                    .desired_width(column_w)
+                    .desired_rows(rows)
+                    .frame(false)
+                    .margin(egui::Margin::symmetric(0, 4))
+                    .layouter(&mut layouter);
+                let output = edit.show(ui);
+                let response = &output.response;
 
-        if response.changed() {
-            app.dirty = true;
-        }
-
-        // Hover detection: ask the rendered galley directly so wrapping is honoured.
-        if let Some(pointer) = response.hover_pos() {
-            let local = pointer - output.galley_pos;
-            if output.galley.rect.contains(local.to_pos2()) {
-                let cursor = output.galley.cursor_from_pos(local);
-                let byte = char_to_byte(&app.editor_text, cursor.ccursor.index);
-                let rev = revisions_for_hover
-                    .iter()
-                    .find(|r| {
-                        r.status == RevisionStatus::Pending
-                            && r.anchor.map(|(s, e)| byte >= s && byte < e).unwrap_or(false)
-                    })
-                    .cloned();
-                if let Some(rev) = rev {
-                    show_revision_tooltip(ui, &rev);
-                } else if let Some(hit) = extract::hit_at(&entity_hits_for_hover, byte) {
-                    show_entity_tooltip(app, ui, hit);
+                if response.changed() {
+                    app.dirty = true;
                 }
-            }
-        }
+
+                if let Some(range) = output.cursor_range {
+                    cursor_char = Some(range.primary.ccursor.index);
+                }
+
+                // Hover detection: ask the rendered galley directly so wrapping is honoured.
+                if let Some(pointer) = response.hover_pos() {
+                    let local = pointer - output.galley_pos;
+                    if output.galley.rect.contains(local.to_pos2()) {
+                        let cursor = output.galley.cursor_from_pos(local);
+                        let byte = char_to_byte(&app.editor_text, cursor.ccursor.index);
+                        let rev = revisions_for_hover
+                            .iter()
+                            .find(|r| {
+                                r.status == RevisionStatus::Pending
+                                    && r.anchor.map(|(s, e)| byte >= s && byte < e).unwrap_or(false)
+                            })
+                            .cloned();
+                        if let Some(rev) = rev {
+                            show_revision_tooltip(ui, &rev);
+                        } else if let Some(hit) = extract::hit_at(&entity_hits_for_hover, byte) {
+                            show_entity_tooltip(app, ui, hit);
+                        }
+                    }
+                }
+            });
+            ui.add_space(pad_x);
+        });
+        ui.add_space(BOTTOM_PADDING);
+        cursor_char
     });
 
     if app.dirty {
         app.refresh_entity_hits();
+    }
+
+    // Persist the reading position for this chapter. Saved values are debounced
+    // through `settings_dirty`; the periodic save in `app.update` handles flushing.
+    if let Some(ch) = app.current_chapter.as_ref() {
+        let path = ch.file_path.clone();
+        let scroll_y = scroll_out.state.offset.y;
+        let new_cursor = scroll_out.inner.unwrap_or_else(|| {
+            app.settings
+                .chapter_places
+                .get(&path)
+                .map(|p| p.cursor)
+                .unwrap_or(0)
+        });
+        let entry = app.settings.chapter_places.entry(path).or_default();
+        let changed = entry.cursor != new_cursor || (entry.scroll - scroll_y).abs() > 1.0;
+        entry.cursor = new_cursor;
+        entry.scroll = scroll_y;
+        if changed {
+            app.settings_dirty = true;
+        }
     }
 }
 
@@ -157,11 +231,20 @@ fn pipeline_color(p: Pipeline) -> Color32 {
     }
 }
 
-fn build_job(text: &str, font_size: f32, hits: &[EntityHit], revisions: &[Revision]) -> LayoutJob {
+fn build_job(
+    text: &str,
+    font_size: f32,
+    line_height: f32,
+    family: &FontFamily,
+    hits: &[EntityHit],
+    revisions: &[Revision],
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     let base = TextFormat {
-        font_id: FontId::new(font_size, egui::FontFamily::Monospace),
+        font_id: FontId::new(font_size, family.clone()),
         color: theme::TEXT_PRIMARY,
+        line_height: Some(line_height),
+        extra_letter_spacing: 0.1,
         ..Default::default()
     };
 
