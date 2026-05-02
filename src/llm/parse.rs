@@ -25,6 +25,135 @@ pub fn parse_json_object<T: for<'de> Deserialize<'de>>(buf: &str, label: &str) -
     }
 }
 
+/// Recover the elements of a `"<key>": [ ... ]` array when the surrounding
+/// document is malformed. Local models occasionally hallucinate stray
+/// non-JSON tokens between array elements (e.g. a bare `im,` between two
+/// objects); strict parsing then drops the whole batch. We walk the array
+/// element-by-element, parse each balanced `{...}` block independently, and
+/// silently skip the ones that don't deserialize. Use only as a fallback
+/// after `parse_json_object` returns `None` — partial output is better than
+/// none, but unconditional salvage would mask real schema regressions.
+pub fn salvage_array<T>(buf: &str, key: &str) -> Vec<T>
+where
+    T: for<'de> serde::de::DeserializeOwned,
+{
+    let extracted = extract_json_object(buf);
+    let sanitized = sanitize_json_strings(extracted);
+    let bytes = sanitized.as_bytes();
+
+    let Some(start) = find_array_start(&sanitized, key) else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<T> = Vec::new();
+    let mut i = start;
+    let mut in_str = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if in_str {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_str = true;
+                i += 1;
+            }
+            b']' => break,
+            b'{' => {
+                let Some(end) = find_balanced_close(bytes, i) else {
+                    break;
+                };
+                let elem = &sanitized[i..=end];
+                if let Ok(v) = serde_json::from_str::<T>(elem) {
+                    out.push(v);
+                }
+                i = end + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Locate `"<key>"` followed (after whitespace) by `:` then `[`, and return
+/// the byte index just past the `[`. The `:` check filters out incidental
+/// occurrences of the key as a value substring.
+fn find_array_start(s: &str, key: &str) -> Option<usize> {
+    let needle = format!("\"{key}\"");
+    let bytes = s.as_bytes();
+    let mut search_from = 0usize;
+    loop {
+        let rel = s[search_from..].find(&needle)?;
+        let after_key = search_from + rel + needle.len();
+        let mut k = after_key;
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if k < bytes.len() && bytes[k] == b':' {
+            k += 1;
+            while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if k < bytes.len() && bytes[k] == b'[' {
+                return Some(k + 1);
+            }
+        }
+        search_from = after_key;
+    }
+}
+
+/// Given an opening `{` at `start`, return the byte index of its matching
+/// `}`, tracking string state so braces inside strings don't count. Returns
+/// `None` if the object is unbalanced.
+fn find_balanced_close(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert!(bytes.get(start) == Some(&b'{'));
+    let mut depth = 1i32;
+    let mut i = start + 1;
+    let mut in_str = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if in_str {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Extract the first balanced `{...}` block. Tolerates code fences,
 /// leading/trailing commentary, and stray whitespace. Falls back to the
 /// trimmed input if no `{` is found.
@@ -185,6 +314,65 @@ mod tests {
         let fixed = sanitize_json_strings(bad);
         let v: serde_json::Value = serde_json::from_str(&fixed).expect("parse");
         assert_eq!(v["q"], "he said \"hi\"\nthen left");
+    }
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    struct TestFlag {
+        #[serde(default)]
+        kind: String,
+        #[serde(default)]
+        quote: String,
+    }
+
+    #[test]
+    fn salvage_recovers_elements_around_stray_token() {
+        // Reproduces the failing case from the log: a bare `im,` between two
+        // valid array elements. Strict parse fails; salvage should return the
+        // three valid elements.
+        let bad = r#"{
+  "flags": [
+    { "kind": "spelling", "quote": "judgement" },
+    { "kind": "punctuation", "quote": "Wua, were perfect" },
+    im,
+    { "kind": "spelling", "quote": "ammassed" }
+  ]
+}"#;
+        assert!(
+            serde_json::from_str::<serde_json::Value>(bad).is_err(),
+            "input must actually be malformed"
+        );
+        let flags: Vec<TestFlag> = salvage_array(bad, "flags");
+        assert_eq!(flags.len(), 3);
+        assert_eq!(flags[0].quote, "judgement");
+        assert_eq!(flags[1].quote, "Wua, were perfect");
+        assert_eq!(flags[2].quote, "ammassed");
+    }
+
+    #[test]
+    fn salvage_returns_empty_when_key_missing() {
+        let s = r#"{"other": [{"kind":"x"}]}"#;
+        let flags: Vec<TestFlag> = salvage_array(s, "flags");
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn salvage_ignores_truncated_trailing_object() {
+        // Last element is missing its closing brace — give up cleanly and
+        // return the elements parsed so far.
+        let bad = r#"{"flags":[{"kind":"a","quote":"q1"},{"kind":"b","quote":"q2"#;
+        let flags: Vec<TestFlag> = salvage_array(bad, "flags");
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].quote, "q1");
+    }
+
+    #[test]
+    fn salvage_skips_value_with_matching_substring() {
+        // A `"flags"` substring inside a why-text must not be picked as the
+        // array key (it's not followed by `:`).
+        let s = r#"{"why":"contains \"flags\" word","flags":[{"kind":"k","quote":"q"}]}"#;
+        let flags: Vec<TestFlag> = salvage_array(s, "flags");
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].quote, "q");
     }
 
     #[test]

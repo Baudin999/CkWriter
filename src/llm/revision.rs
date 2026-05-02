@@ -75,11 +75,35 @@ pub struct Revision {
 }
 
 pub fn parse_voice(buf: &str) -> Option<RawVoice> {
-    super::parse::parse_json_object(buf, "voice")
+    if let Some(v) = super::parse::parse_json_object::<RawVoice>(buf, "voice") {
+        return Some(v);
+    }
+    let flags: Vec<RawFlag> = super::parse::salvage_array(buf, "flags");
+    if flags.is_empty() {
+        None
+    } else {
+        log::warn!(
+            "voice: strict parse failed; salvaged {} flag(s) from malformed array",
+            flags.len()
+        );
+        Some(RawVoice { score: None, flags, preserved: Vec::new() })
+    }
 }
 
 pub fn parse_flags_only(buf: &str) -> Option<RawFlagsOnly> {
-    super::parse::parse_json_object(buf, "flags")
+    if let Some(v) = super::parse::parse_json_object::<RawFlagsOnly>(buf, "flags") {
+        return Some(v);
+    }
+    let flags: Vec<RawFlag> = super::parse::salvage_array(buf, "flags");
+    if flags.is_empty() {
+        None
+    } else {
+        log::warn!(
+            "flags: strict parse failed; salvaged {} flag(s) from malformed array",
+            flags.len()
+        );
+        Some(RawFlagsOnly { flags })
+    }
 }
 
 /// Locate `quote` inside `text`. Returns the first byte-offset match. Quote-anchoring

@@ -16,6 +16,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestOutcome {
+    /// Parsed cleanly (strict or salvage); revisions populated, possibly empty.
+    Done,
+    /// Both strict parse and salvage produced zero flags. Caller may retry by
+    /// asking the model to repair its own JSON.
+    NeedsRepair,
+}
+
 pub struct CkWriterApp {
     pub settings: Settings,
     pub book: Option<Book>,
@@ -34,6 +43,11 @@ pub struct CkWriterApp {
 
     pub stream: Option<llm::StreamHandle>,
     pub stream_pipeline: Option<Pipeline>,
+    /// Set when `stream` is a follow-up call asking the model to repair the
+    /// previous malformed JSON. Guarantees the repair fallback runs at most
+    /// once per pipeline invocation — a failed repair surfaces an error
+    /// rather than triggering another repair.
+    pub stream_is_repair: bool,
     pub last_stream_buffer: Option<String>,
     pub revisions: Vec<Revision>,
     pub next_rev_id: u32,
@@ -128,6 +142,7 @@ impl CkWriterApp {
             character_search: String::new(),
             stream: None,
             stream_pipeline: None,
+            stream_is_repair: false,
             last_stream_buffer: None,
             revisions: Vec::new(),
             next_rev_id: 1,
@@ -887,6 +902,7 @@ impl CkWriterApp {
         if stream.done {
             let buffer = std::mem::take(&mut stream.buffer);
             let pipeline = self.stream_pipeline.take().unwrap_or(Pipeline::Voice);
+            let was_repair = std::mem::take(&mut self.stream_is_repair);
             let err = stream.error.take();
             self.stream = None;
             self.last_stream_buffer = Some(buffer.clone());
@@ -894,11 +910,65 @@ impl CkWriterApp {
                 self.last_error = Some(e);
                 return;
             }
-            self.ingest_response(pipeline, &buffer);
+            let outcome = self.ingest_response(pipeline, &buffer);
+            if outcome == IngestOutcome::NeedsRepair {
+                // Dump the unsalvageable response so we can study the patterns
+                // offline and tighten the salvage parser. Failures from the
+                // first attempt and the repair attempt land in the same dir
+                // with distinct suffixes.
+                let suffix = if was_repair { "broken-after-repair" } else { "broken" };
+                dump_unsalvageable(pipeline, &buffer, suffix);
+                if !was_repair {
+                    // One last attempt: hand the broken text back to the model
+                    // and ask it to repair the JSON. Guarded by `was_repair`
+                    // so a malformed repair response can't trigger another.
+                    self.start_json_repair(pipeline, &buffer);
+                }
+            }
         }
     }
 
-    fn ingest_response(&mut self, pipeline: Pipeline, buffer: &str) {
+    fn start_json_repair(&mut self, pipeline: Pipeline, broken: &str) {
+        log::warn!(
+            "pipeline={} repair: asking model to fix malformed JSON ({} bytes)",
+            pipeline.label(),
+            broken.len(),
+        );
+        let system = "You are a JSON repair tool. The input is a JSON document that failed to parse. \
+Output only the corrected JSON — no commentary, no code fences, no explanation. \
+Preserve every valid array element; drop or fix invalid tokens (stray identifiers, \
+missing commas, unbalanced braces) to produce strict, parseable JSON. \
+The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\"...\",\"suggestion\":\"...\"}]}`.";
+        let user = format!("Fix this JSON:\n\n{broken}");
+        let messages = vec![
+            llm::ChatMessage::system(system.to_string()),
+            llm::ChatMessage::user(user),
+        ];
+        // Repair runs on a much smaller payload than the original prompt
+        // (just the broken response + a short instruction). Same num_predict
+        // ceiling so we don't truncate the corrected output.
+        let tuning = llm::ChatTuning {
+            temperature: 0.1,
+            num_ctx: 16_384,
+            num_predict: 2_048,
+        };
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            true,
+            tuning,
+        );
+        self.stream = Some(handle);
+        self.stream_pipeline = Some(pipeline);
+        self.stream_is_repair = true;
+        self.last_error = Some(format!(
+            "{}: response was malformed; asking model to repair…",
+            pipeline.label()
+        ));
+    }
+
+    fn ingest_response(&mut self, pipeline: Pipeline, buffer: &str) -> IngestOutcome {
         use crate::llm::revision::{anchor, parse_flags_only, parse_voice, FlagKind};
         let prose = latex::to_prose(&self.editor_text);
         let parsed_ok;
@@ -992,6 +1062,11 @@ impl CkWriterApp {
                 format!("{}: model returned 0 flags", pipeline.label())
             };
             self.last_error = Some(msg);
+        }
+        if parsed_ok {
+            IngestOutcome::Done
+        } else {
+            IngestOutcome::NeedsRepair
         }
     }
 
@@ -1273,6 +1348,33 @@ fn apply_mirror_op(book: &mut Book, self_id: &str, op: MirrorOp) -> anyhow::Resu
         }
     }
     Ok(())
+}
+
+/// Persist a malformed LLM response to `<repo>/test-results/` so we can study
+/// the failure pattern offline and harden the salvage parser. Uses the build
+/// directory of the binary so dumps land in the source tree, not the user's
+/// state dir. Failures here are non-fatal — we just log and move on.
+fn dump_unsalvageable(pipeline: Pipeline, buffer: &str, suffix: &str) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-results");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("test-results: cannot create {}: {e}", dir.display());
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("{ts}-{}-{suffix}.json", pipeline.label()));
+    if let Err(e) = std::fs::write(&path, buffer) {
+        log::warn!("test-results: write failed for {}: {e}", path.display());
+        return;
+    }
+    log::info!(
+        "test-results: dumped malformed {} response ({} bytes) to {}",
+        pipeline.label(),
+        buffer.len(),
+        path.display()
+    );
 }
 
 fn preview_for_log(s: &str, max: usize) -> String {
