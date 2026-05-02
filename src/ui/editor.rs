@@ -84,6 +84,9 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             .set_char_range(Some(CCursorRange::one(CCursor::new(idx))));
         state.store(ui.ctx(), editor_id);
     }
+    // Consume now so the post-render block knows whether to scroll the
+    // cursor into view this frame.
+    let scroll_to_cursor = std::mem::take(&mut app.pending_scroll_to_cursor);
 
     let mut scroll = egui::ScrollArea::vertical().auto_shrink([false; 2]);
     if let Some(off) = scroll_target {
@@ -117,6 +120,34 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
 
                 if let Some(range) = output.cursor_range {
                     cursor_char = Some(range.primary.ccursor.index);
+                }
+
+                // After the TextEdit has rendered, we know exactly where the
+                // cursor sits in the wrapped galley. Translate that local
+                // rect into screen coords and ask the parent ScrollArea to
+                // bring it on-screen — this is the one path that handles
+                // soft-wrapped LaTeX paragraphs correctly.
+                if scroll_to_cursor {
+                    match output.cursor_range {
+                        Some(range) => {
+                            let local_rect = output.galley.pos_from_cursor(&range.primary);
+                            let screen_rect =
+                                local_rect.translate(output.galley_pos.to_vec2());
+                            log::info!(
+                                "editor scroll_to_cursor: ccursor={} local_rect={:?} galley_pos={:?} screen_rect={:?}",
+                                range.primary.ccursor.index,
+                                local_rect,
+                                output.galley_pos,
+                                screen_rect,
+                            );
+                            ui.scroll_to_rect(screen_rect, Some(egui::Align::Center));
+                        }
+                        None => {
+                            log::warn!(
+                                "editor scroll_to_cursor: output.cursor_range is None — cursor wasn't installed before render"
+                            );
+                        }
+                    }
                 }
 
                 // Hover detection: ask the rendered galley directly so wrapping is honoured.

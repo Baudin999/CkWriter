@@ -905,8 +905,14 @@ fn revision_card(
             // the card. Putting the buttons inside the same click rect would
             // let the body absorb their clicks (egui registers the parent's
             // sense after the children, so the parent wins on overlap).
-            let body_resp = ui
-                .scope(|ui| {
+            //
+            // We use a Frame::none rather than ui.scope so the response carries
+            // a real allocated rect that egui's hit-tester recognises — the
+            // scope variant produced a hover-only allocation that
+            // .interact(Sense::click()) didn't always upgrade reliably.
+            let body_inner = egui::Frame::new()
+                .inner_margin(egui::Margin::ZERO)
+                .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         let chip_label = if rev.kind == crate::llm::revision::FlagKind::Other {
@@ -934,10 +940,18 @@ fn revision_card(
                     if !rev.suggestion.is_empty() {
                         ui.label(RichText::new(&rev.suggestion).color(Color32::WHITE));
                     }
-                })
-                .response
-                .interact(egui::Sense::click());
+                });
+            let body_resp = body_inner.response.interact(egui::Sense::click());
             body_clicked = body_resp.clicked();
+            if body_clicked {
+                log::info!(
+                    "revision card body clicked: id={} pipeline={} kind={:?} anchor={:?}",
+                    rev.id,
+                    rev.pipeline.label(),
+                    rev.kind,
+                    rev.anchor,
+                );
+            }
 
             // Action row lives OUTSIDE the body's click rect, so button
             // clicks don't double as a "select card" click.

@@ -126,7 +126,17 @@ Rules:
 - Maximum 8 flags. Prefer surgical cuts over rewrites.
 - If you have nothing to flag, return {"flags": []}."#;
 
-const SPELLING_INSTRUCTIONS: &str = r#"You are a copy editor. Find spelling, punctuation, and grammar mistakes in the prose below.
+const SPELLING_INSTRUCTIONS: &str = r#"You are a copy editor for US English. Find spelling, punctuation, and grammar mistakes in the prose below.
+
+Use US English spelling and punctuation conventions:
+- "color", "honor", "favor", "neighbor" — not "colour", "honour", "favour", "neighbour".
+- "realize", "organize", "analyze" — not "realise", "organise", "analyse".
+- "traveled", "canceled", "labeled" — not "travelled", "cancelled", "labelled".
+- "center", "theater", "meter" — not "centre", "theatre", "metre".
+- Serial (Oxford) comma is acceptable; do not flag its presence or absence.
+- Place commas and periods inside closing quotation marks.
+- Use straight or curly quotes consistently with the surrounding prose; do not flap quotes that match the document's existing style.
+- Flag British spellings as spelling mistakes.
 
 Return STRICT JSON in this exact shape and NOTHING else — no preface, no commentary, no markdown fences, no code blocks. Your entire response must be a single JSON object.
 

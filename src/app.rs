@@ -103,6 +103,11 @@ pub struct CkWriterApp {
     /// One-shot: char index to install into the editor's TextEditState on the
     /// next frame (used to restore the saved cursor when re-opening a chapter).
     pub pending_cursor_char: Option<usize>,
+    /// One-shot: after the next editor render, scroll so the active cursor
+    /// is in view. Uses the galley's pixel rect, which is the only correct
+    /// way to position wrapped LaTeX paragraphs (line-counting on `\n` is
+    /// wildly wrong because one source line wraps to many visual rows).
+    pub pending_scroll_to_cursor: bool,
 }
 
 impl CkWriterApp {
@@ -166,6 +171,7 @@ impl CkWriterApp {
             pending_scroll_line: None,
             pending_scroll_offset: None,
             pending_cursor_char: None,
+            pending_scroll_to_cursor: false,
         };
         if let Some(p) = app.settings.last_book.clone() {
             if p.exists() {
@@ -1031,6 +1037,7 @@ impl CkWriterApp {
     /// same revision off returns nothing to the editor (cursor stays put).
     pub fn select_revision(&mut self, id: u32) {
         if self.selected_revision == Some(id) {
+            log::info!("select_revision: deselecting id={id}");
             self.selected_revision = None;
             return;
         }
@@ -1039,6 +1046,7 @@ impl CkWriterApp {
             .iter()
             .find(|r| r.id == id)
             .and_then(|r| r.anchor);
+        log::info!("select_revision: id={id} anchor={anchor:?}");
         self.selected_revision = Some(id);
         if let Some((s, _)) = anchor {
             self.jump_to_anchor(s);
@@ -1109,14 +1117,24 @@ impl CkWriterApp {
     }
 
     /// Scroll the editor so the byte at `byte_start` is in view, and place
-    /// the cursor there. Used by the AI panel's "Jump" button so the writer
-    /// can see a flagged passage in context before accepting the suggestion.
+    /// the cursor there. Used by the AI panel's selected-card flow so the
+    /// writer can see a flagged passage in context before accepting it.
+    /// The actual scroll happens after the editor renders, using the galley's
+    /// pixel-accurate cursor rect; we cannot use line counting because LaTeX
+    /// prose paragraphs wrap onto many visual rows per source line.
     pub fn jump_to_anchor(&mut self, byte_start: usize) {
         let cap = byte_start.min(self.editor_text.len());
-        let line = self.editor_text[..cap].bytes().filter(|&b| b == b'\n').count();
         let char_idx = self.editor_text[..cap].chars().count();
-        self.pending_scroll_line = Some(line);
+        log::info!(
+            "jump_to_anchor: byte={byte_start} cap={cap} char_idx={char_idx} text_len={}",
+            self.editor_text.len(),
+        );
         self.pending_cursor_char = Some(char_idx);
+        self.pending_scroll_to_cursor = true;
+        // These two paths drive line- or pixel-based scrolls and would race
+        // with the post-render scroll-to-cursor below.
+        self.pending_scroll_line = None;
+        self.pending_scroll_offset = None;
     }
 
     pub fn jump_to_source(&mut self, file: &Path, line: u32) {
