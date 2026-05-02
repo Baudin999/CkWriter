@@ -5,7 +5,7 @@ use crate::llm::prompts::Pipeline;
 use crate::llm::revision::{Revision, RevisionStatus};
 use crate::theme;
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Color32, FontId, Pos2, RichText, Stroke};
+use egui::{Color32, FontId, RichText, Stroke};
 
 pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     if app.book.is_none() {
@@ -54,39 +54,42 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         scroll = scroll.vertical_scroll_offset(off);
     }
     scroll.show(ui, |ui| {
-            let edit = egui::TextEdit::multiline(&mut app.editor_text)
-                .font(FontId::new(font_size, egui::FontFamily::Monospace))
-                .desired_width(f32::INFINITY)
-                .desired_rows(28)
-                .layouter(&mut layouter);
-            let response = ui.add_sized(ui.available_size(), edit);
+        let avail = ui.available_size();
+        let rows = ((avail.y / row_height).floor() as usize).max(8);
 
-            if response.changed() {
-                app.dirty = true;
-            }
+        let edit = egui::TextEdit::multiline(&mut app.editor_text)
+            .font(FontId::new(font_size, egui::FontFamily::Monospace))
+            .desired_width(avail.x)
+            .desired_rows(rows)
+            .layouter(&mut layouter);
+        let output = edit.show(ui);
+        let response = &output.response;
 
-            // Hover detection (after the TextEdit borrow has released).
-            if let Some(pointer) = ui.ctx().pointer_hover_pos() {
-                if response.rect.contains(pointer) {
-                    if let Some(byte) =
-                        pointer_to_byte(&response, ui, pointer, &app.editor_text, font_size)
-                    {
-                        let rev = revisions_for_hover
-                            .iter()
-                            .find(|r| {
-                                r.status == RevisionStatus::Pending
-                                    && r.anchor.map(|(s, e)| byte >= s && byte < e).unwrap_or(false)
-                            })
-                            .cloned();
-                        if let Some(rev) = rev {
-                            show_revision_tooltip(ui, &rev);
-                        } else if let Some(hit) = extract::hit_at(&entity_hits_for_hover, byte) {
-                            show_entity_tooltip(app, ui, hit);
-                        }
-                    }
+        if response.changed() {
+            app.dirty = true;
+        }
+
+        // Hover detection: ask the rendered galley directly so wrapping is honoured.
+        if let Some(pointer) = response.hover_pos() {
+            let local = pointer - output.galley_pos;
+            if output.galley.rect.contains(local.to_pos2()) {
+                let cursor = output.galley.cursor_from_pos(local);
+                let byte = char_to_byte(&app.editor_text, cursor.ccursor.index);
+                let rev = revisions_for_hover
+                    .iter()
+                    .find(|r| {
+                        r.status == RevisionStatus::Pending
+                            && r.anchor.map(|(s, e)| byte >= s && byte < e).unwrap_or(false)
+                    })
+                    .cloned();
+                if let Some(rev) = rev {
+                    show_revision_tooltip(ui, &rev);
+                } else if let Some(hit) = extract::hit_at(&entity_hits_for_hover, byte) {
+                    show_entity_tooltip(app, ui, hit);
                 }
             }
-        });
+        }
+    });
 
     if app.dirty {
         app.refresh_entity_hits();
@@ -200,57 +203,9 @@ fn build_job(text: &str, font_size: f32, hits: &[EntityHit], revisions: &[Revisi
     job
 }
 
-fn pointer_to_byte(
-    response: &egui::Response,
-    ui: &egui::Ui,
-    pointer: Pos2,
-    text: &str,
-    font_size: f32,
-) -> Option<usize> {
-    let row_height =
-        ui.fonts(|f| f.row_height(&FontId::new(font_size, egui::FontFamily::Monospace)));
-    let rel = pointer - response.rect.min;
-    if rel.x < 0.0 || rel.y < 0.0 {
-        return None;
-    }
-    let row = (rel.y / row_height).floor() as usize;
-
-    // Walk lines to find row_start byte index.
-    let mut current_row = 0usize;
-    let mut row_start = 0usize;
-    let mut found = false;
-    if row == 0 {
-        found = true;
-    } else {
-        for (idx, ch) in text.char_indices() {
-            if ch == '\n' {
-                current_row += 1;
-                if current_row == row {
-                    row_start = idx + 1;
-                    found = true;
-                    break;
-                }
-            }
-        }
-    }
-    if !found {
-        return None;
-    }
-
-    let char_w = ui.fonts(|f| {
-        f.glyph_width(&FontId::new(font_size, egui::FontFamily::Monospace), 'M')
-    });
-    let col = (rel.x / char_w.max(1.0)).round() as usize;
-
-    let mut visible = 0usize;
-    for (off, ch) in text[row_start..].char_indices() {
-        if visible >= col {
-            return Some(row_start + off);
-        }
-        if ch == '\n' {
-            return Some(row_start + off);
-        }
-        visible += 1;
-    }
-    Some(text.len())
+fn char_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
 }

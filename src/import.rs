@@ -76,7 +76,7 @@ fn split_name_rest(line: &str) -> (String, &str) {
         name_end = i + ch.len_utf8();
     }
     let (name, rest) = line.split_at(name_end);
-    let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ',' || c == '-' || c == '—');
+    let rest = rest.trim_start_matches([' ', ',', '-', '—']);
     (name.trim().to_string(), rest.trim())
 }
 
@@ -87,9 +87,9 @@ fn pull_aliases(rest: &str) -> Option<Vec<String>> {
     let end = rest.find(')')?;
     let inside = &rest[1..end];
     let aliases: Vec<String> = inside
-        .split(|c| c == ',' || c == ';')
+        .split([',', ';'])
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s.chars().next().map_or(false, |c| c.is_uppercase()))
+        .filter(|s| !s.is_empty() && s.chars().next().is_some_and(|c| c.is_uppercase()))
         .collect();
     if aliases.is_empty() {
         None

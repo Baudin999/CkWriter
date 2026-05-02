@@ -31,6 +31,7 @@ pub fn extract_chapter_title(tex: &str) -> Option<String> {
 /// - replaces `\textit{X}`, `\textbf{X}` with X
 /// - removes `\switch`, `\nl`, `\maketitle`
 /// - removes `\chapter{X}`, `\section{X}`
+///
 /// Cursor offsets are not preserved here — this is for sending to the LLM only.
 pub fn to_prose(tex: &str) -> String {
     let mut out = String::with_capacity(tex.len());

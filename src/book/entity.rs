@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntityKind {
+    #[default]
     Character,
     Location,
     Event,
@@ -70,12 +71,6 @@ pub struct Entity {
     pub when: String,
     #[serde(default)]
     pub participants: Vec<String>,
-}
-
-impl Default for EntityKind {
-    fn default() -> Self {
-        EntityKind::Character
-    }
 }
 
 impl Entity {

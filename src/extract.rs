@@ -92,7 +92,7 @@ fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
 }
 
 /// Find the entity hit at character byte offset `byte` (cursor position).
-pub fn hit_at<'a>(hits: &'a [EntityHit], byte: usize) -> Option<&'a EntityHit> {
+pub fn hit_at(hits: &[EntityHit], byte: usize) -> Option<&EntityHit> {
     hits.iter().find(|h| byte >= h.start && byte < h.end)
 }
 
@@ -155,10 +155,10 @@ pub fn frequency_map(hits: &[EntityHit]) -> Vec<(String, EntityKind, usize)> {
     v
 }
 
-pub fn by_kind<'a>(
-    freqs: &'a [(String, EntityKind, usize)],
+pub fn by_kind(
+    freqs: &[(String, EntityKind, usize)],
     kind: EntityKind,
-) -> Vec<(&'a str, usize)> {
+) -> Vec<(&str, usize)> {
     freqs
         .iter()
         .filter(|(_, k, _)| *k == kind)
