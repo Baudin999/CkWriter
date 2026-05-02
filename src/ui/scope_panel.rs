@@ -10,6 +10,7 @@ pub enum Tab {
     Characters,
     Locations,
     AI,
+    Chat,
     Notes,
 }
 
@@ -29,6 +30,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             (Tab::Characters, "Characters"),
             (Tab::Locations, "Locations"),
             (Tab::AI, "AI"),
+            (Tab::Chat, "Chat"),
             (Tab::Notes, "Notes"),
         ] {
             let selected = app.scope_tab == tab;
@@ -43,6 +45,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         Tab::Characters => show_characters(app, ui),
         Tab::Locations => show_locations(app, ui),
         Tab::AI => show_ai(app, ui),
+        Tab::Chat => show_chat(app, ui),
         Tab::Notes => show_notes(app, ui),
     }
 }
@@ -877,6 +880,143 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     if let Some(id) = dismiss_id {
         app.dismiss_revision(id);
     }
+}
+
+fn show_chat(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.book.is_none() {
+        empty_state(ui, "Open a book", "Load a book to chat about a chapter.");
+        return;
+    }
+    if app.current_chapter.is_none() {
+        empty_state(
+            ui,
+            "Open a chapter",
+            "Pick a chapter and the model will read it as context.",
+        );
+        return;
+    }
+
+    let busy = app.chat_stream.is_some();
+    let chapter_label = app
+        .current_chapter
+        .as_ref()
+        .map(|c| c.display_title.clone())
+        .unwrap_or_default();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(format!("about: {chapter_label}"))
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_enabled_ui(!busy && !app.chat_messages.is_empty(), |ui| {
+                if ui.small_button("clear").clicked() {
+                    app.reset_chat();
+                }
+            });
+        });
+    });
+
+    if busy {
+        ui.label(
+            RichText::new("● thinking…")
+                .small()
+                .color(theme::REVISION_VOICE),
+        );
+    } else if !app.ollama_ok {
+        ui.label(
+            RichText::new("ollama unreachable")
+                .small()
+                .color(Color32::LIGHT_RED),
+        );
+    } else if let Some(err) = &app.chat_error {
+        ui.label(RichText::new(err).small().color(Color32::LIGHT_RED));
+    }
+    ui.separator();
+
+    // Reserve a fixed slice for the input row at the bottom; the transcript
+    // takes the rest. Without this the ScrollArea expands and the input
+    // disappears below the fold.
+    let input_h: f32 = 96.0;
+    let total_h = ui.available_height();
+    let transcript_h = (total_h - input_h - 8.0).max(120.0);
+
+    egui::ScrollArea::vertical()
+        .id_salt("chat-transcript-scroll")
+        .max_height(transcript_h)
+        .auto_shrink([false; 2])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            if app.chat_messages.is_empty() && app.chat_pending_assistant.is_empty() {
+                empty_state(
+                    ui,
+                    "Ask about this chapter.",
+                    "Try: \"Where does the pacing sag?\" or \"Is Kira's voice consistent here?\"",
+                );
+                return;
+            }
+            for msg in &app.chat_messages {
+                chat_bubble(ui, &msg.role, &msg.content);
+            }
+            if !app.chat_pending_assistant.is_empty() {
+                chat_bubble(ui, "assistant", &app.chat_pending_assistant);
+            }
+        });
+
+    ui.separator();
+
+    let mut send_now = false;
+    ui.horizontal(|ui| {
+        let resp = ui.add_sized(
+            egui::vec2(ui.available_width() - 80.0, 64.0),
+            egui::TextEdit::multiline(&mut app.chat_input)
+                .desired_rows(3)
+                .hint_text("ask the model about this chapter…"),
+        );
+        // Cmd/Ctrl+Enter sends; plain Enter inserts a newline so multi-line
+        // questions are easy to write.
+        if resp.has_focus()
+            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
+        {
+            send_now = true;
+        }
+        ui.vertical(|ui| {
+            ui.add_enabled_ui(!busy && !app.chat_input.trim().is_empty(), |ui| {
+                if ui
+                    .add_sized(egui::vec2(72.0, 28.0), egui::Button::new("Send"))
+                    .clicked()
+                {
+                    send_now = true;
+                }
+            });
+            ui.label(
+                RichText::new("⌘↵")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+        });
+    });
+    if send_now {
+        app.send_chat_message();
+    }
+}
+
+fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
+    let (label, fg) = match role {
+        "user" => ("you", theme::ACCENT),
+        "assistant" => ("ai", theme::REVISION_VOICE),
+        other => (other, theme::TEXT_MUTED),
+    };
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(label).small().color(fg).strong());
+            ui.label(RichText::new(content).color(theme::TEXT_PRIMARY));
+        });
+    ui.add_space(4.0);
 }
 
 fn show_notes(app: &mut CkWriterApp, ui: &mut egui::Ui) {

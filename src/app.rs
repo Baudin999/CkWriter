@@ -55,6 +55,18 @@ pub struct CkWriterApp {
     /// chapter saves so the inspector can show "Appears in N chapters".
     pub char_index: Option<CrossChapterIndex>,
 
+    /// Conversational-AI panel state. The transcript holds user/assistant
+    /// turns only; the system prompt (chapter prose + cast) is rebuilt on
+    /// every send so it stays current with edits.
+    pub chat_messages: Vec<llm::ChatMessage>,
+    pub chat_input: String,
+    pub chat_stream: Option<llm::StreamHandle>,
+    pub chat_pending_assistant: String,
+    pub chat_error: Option<String>,
+    /// Chapter the chat history was started against. Used to invalidate the
+    /// transcript when the writer opens a different chapter.
+    pub chat_chapter: Option<PathBuf>,
+
     pub last_error: Option<String>,
     pub ollama_ok: bool,
     pub last_ollama_check: f64,
@@ -119,6 +131,12 @@ impl CkWriterApp {
             progression_target: None,
             progression_status: None,
             char_index: None,
+            chat_messages: Vec::new(),
+            chat_input: String::new(),
+            chat_stream: None,
+            chat_pending_assistant: String::new(),
+            chat_error: None,
+            chat_chapter: None,
             last_error: None,
             ollama_ok: false,
             last_ollama_check: 0.0,
@@ -204,6 +222,12 @@ impl CkWriterApp {
         self.progression_target = None;
         self.progression_status = None;
         self.char_index = None;
+        self.chat_messages.clear();
+        self.chat_input.clear();
+        self.chat_stream = None;
+        self.chat_pending_assistant.clear();
+        self.chat_error = None;
+        self.chat_chapter = None;
         self.rebuild_char_index();
         self.settings.touch_recent(root);
         if let Some(model) = self
@@ -228,10 +252,18 @@ impl CkWriterApp {
         if self.dirty {
             let _ = self.save_chapter();
         }
+        let chapter_changed = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.file_path != path)
+            .unwrap_or(true);
         match std::fs::read_to_string(path) {
             Ok(text) => {
                 self.editor_text = text;
                 self.dirty = false;
+                if chapter_changed {
+                    self.reset_chat();
+                }
                 if let Some(place) = self.settings.chapter_places.get(path) {
                     self.pending_cursor_char = Some(place.cursor);
                     self.pending_scroll_offset = Some(place.scroll);
@@ -552,6 +584,107 @@ impl CkWriterApp {
         self.char_extract_error = None;
     }
 
+    /// Send the current chat input to the model. Builds a fresh system prompt
+    /// with the live chapter prose so the assistant always answers against
+    /// what's on screen, not a stale snapshot.
+    pub fn send_chat_message(&mut self) {
+        if self.chat_stream.is_some() {
+            return;
+        }
+        let text = self.chat_input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if !self.ollama_ok {
+            self.chat_error = Some("ollama unreachable".into());
+            return;
+        }
+        let Some(book) = self.book.as_ref() else {
+            self.chat_error = Some("open a book first".into());
+            return;
+        };
+        let Some(ch) = self.current_chapter.clone() else {
+            self.chat_error = Some("open a chapter first".into());
+            return;
+        };
+        let prose = latex::to_prose(&self.editor_text);
+        if prose.trim().is_empty() {
+            self.chat_error = Some("the chapter is empty".into());
+            return;
+        }
+        let in_scope = scope::voice_context_entities(book, &self.entity_hits);
+        let system =
+            crate::llm::conversation::build_system(book, &in_scope, &ch.display_title, &prose);
+
+        self.chat_messages.push(llm::ChatMessage::user(text));
+        self.chat_input.clear();
+        self.chat_error = None;
+        self.chat_chapter = Some(ch.file_path.clone());
+
+        let mut messages = Vec::with_capacity(self.chat_messages.len() + 1);
+        messages.push(llm::ChatMessage::system(system));
+        messages.extend(self.chat_messages.iter().cloned());
+
+        let tuning = llm::ChatTuning {
+            temperature: 0.6,
+            num_ctx: 32_768,
+            num_predict: 1_024,
+        };
+        log::info!(
+            "chat send: chapter={:?} history_turns={} prose_chars={}",
+            ch.display_title,
+            self.chat_messages.len(),
+            prose.chars().count(),
+        );
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            false,
+            tuning,
+        );
+        self.chat_stream = Some(handle);
+        self.chat_pending_assistant.clear();
+    }
+
+    pub fn poll_chat_stream(&mut self) {
+        let Some(stream) = self.chat_stream.as_mut() else { return };
+        let _ = stream.poll();
+        if !stream.buffer.is_empty() {
+            self.chat_pending_assistant = stream.buffer.clone();
+        }
+        if !stream.done {
+            return;
+        }
+        let buffer = std::mem::take(&mut stream.buffer);
+        let err = stream.error.take();
+        self.chat_stream = None;
+        if let Some(e) = err {
+            log::error!("chat stream error: {e}");
+            self.chat_error = Some(e);
+            self.chat_pending_assistant.clear();
+            return;
+        }
+        let trimmed = buffer.trim();
+        if trimmed.is_empty() {
+            self.chat_error = Some("model returned an empty response".into());
+            self.chat_pending_assistant.clear();
+            return;
+        }
+        self.chat_messages
+            .push(llm::ChatMessage::assistant(trimmed.to_string()));
+        self.chat_pending_assistant.clear();
+    }
+
+    pub fn reset_chat(&mut self) {
+        self.chat_messages.clear();
+        self.chat_input.clear();
+        self.chat_stream = None;
+        self.chat_pending_assistant.clear();
+        self.chat_error = None;
+        self.chat_chapter = None;
+    }
+
     /// Kick off the per-character progression run for the selected character
     /// against the current chapter. Auto-commits the entity dirty buffer first
     /// if it targets the same character — otherwise the AI append would be
@@ -575,12 +708,15 @@ impl CkWriterApp {
             return;
         }
 
-        if self
-            .entity_dirty
-            .as_ref()
-            .map(|d| d.id == entity_id)
-            .unwrap_or(false)
-        {
+        // entity_dirty is always populated while the inspector is open; only
+        // auto-commit when the working copy actually differs from disk.
+        let needs_commit = match (self.entity_dirty.as_ref(), self.book.as_ref()) {
+            (Some(d), Some(book)) if d.id == entity_id => {
+                book.entity(entity_id).map(|saved| saved != d).unwrap_or(true)
+            }
+            _ => false,
+        };
+        if needs_commit {
             self.commit_entity_edit();
         }
 
@@ -1021,6 +1157,7 @@ impl App for CkWriterApp {
         self.poll_stream();
         self.poll_char_extract_stream();
         self.poll_progression_stream();
+        self.poll_chat_stream();
         self.poll_pdf_build();
         if let Some(r) = self.pdf_renderer.as_mut() {
             if r.poll() {
@@ -1038,6 +1175,7 @@ impl App for CkWriterApp {
         if self.stream.is_some()
             || self.char_stream.is_some()
             || self.progression_stream.is_some()
+            || self.chat_stream.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
@@ -1066,8 +1204,15 @@ impl App for CkWriterApp {
                 self.char_sub_tab,
                 ui::scope_panel::CharSubTab::Cast | ui::scope_panel::CharSubTab::Personae
             );
+        // Entity details only belong on tabs that are about entities — keeping
+        // them visible on AI / Chat / Notes leaks an unrelated character form
+        // under the panel.
+        let inspector_relevant = matches!(
+            self.scope_tab,
+            ui::scope_panel::Tab::Characters | ui::scope_panel::Tab::Locations
+        );
         let bottom_inspector =
-            self.selected_entity.is_some() && !inline_detail_active;
+            self.selected_entity.is_some() && !inline_detail_active && inspector_relevant;
         let right_resp = egui::SidePanel::right("scope")
             .default_width(saved_rw)
             .resizable(true)

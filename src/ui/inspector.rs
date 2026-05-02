@@ -37,36 +37,32 @@ pub fn render_detail(app: &mut CkWriterApp, ui: &mut egui::Ui, existing: &Entity
         ui.heading(&existing.name);
         ui.separator();
 
-        // Take the current dirty buffer if it's for this entity, otherwise start
-        // from the saved version. This keeps edits coherent across re-renders.
+        // The form is two-way bound to `app.entity_dirty`. Each frame we lift
+        // the working copy into a local, let the widgets mutate it directly,
+        // and unconditionally write it back. The previous `if changed` gate
+        // dropped keystrokes whenever a sub-widget didn't propagate `.changed()`.
         let mut e = match app.entity_dirty.as_ref() {
             Some(d) if d.id == existing.id => d.clone(),
             _ => existing.clone(),
         };
-        let mut changed = false;
 
         egui::Grid::new(format!("inspector-grid-{id}"))
             .num_columns(2)
             .spacing([8.0, 6.0])
             .show(ui, |ui| {
-                field(ui, "name", &mut e.name, &mut changed);
-                field(ui, "role", &mut e.role, &mut changed);
-                field(ui, "age", &mut e.age, &mut changed);
-                field(ui, "tone", &mut e.tone, &mut changed);
-                category_row(ui, app, &mut e.category, &mut changed);
+                field(ui, "name", &mut e.name);
+                field(ui, "role", &mut e.role);
+                field(ui, "age", &mut e.age);
+                field(ui, "tone", &mut e.tone);
+                category_row(ui, app, &mut e.category);
             });
 
         ui.label(RichText::new("voice notes").small().color(theme::TEXT_MUTED));
-        if ui
-            .add(
-                egui::TextEdit::multiline(&mut e.voice_notes)
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY),
-            )
-            .changed()
-        {
-            changed = true;
-        }
+        ui.add(
+            egui::TextEdit::multiline(&mut e.voice_notes)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY),
+        );
 
         ui.label(
             RichText::new("aliases (comma-separated)")
@@ -83,7 +79,6 @@ pub fn render_detail(app: &mut CkWriterApp, ui: &mut egui::Ui, existing: &Entity
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            changed = true;
         }
 
         ui.label(
@@ -91,26 +86,23 @@ pub fn render_detail(app: &mut CkWriterApp, ui: &mut egui::Ui, existing: &Entity
                 .small()
                 .color(theme::TEXT_MUTED),
         );
-        if ui
-            .add(
-                egui::TextEdit::multiline(&mut e.free_text)
-                    .desired_rows(6)
-                    .desired_width(f32::INFINITY),
-            )
-            .changed()
-        {
-            changed = true;
-        }
+        ui.add(
+            egui::TextEdit::multiline(&mut e.free_text)
+                .desired_rows(6)
+                .desired_width(f32::INFINITY),
+        );
 
         ui.add_space(6.0);
-        relations_section(ui, app, &existing.id, &mut e.relations, &mut changed);
+        relations_section(ui, app, &existing.id, &mut e.relations);
 
-        if changed {
-            app.entity_dirty = Some(e);
-        }
+        // Always store the working copy back. `can_save` is derived from the
+        // diff against the saved entity, so a no-op write here doesn't trip
+        // the Save/Revert buttons.
+        let dirty = e != *existing;
+        app.entity_dirty = Some(e);
 
         ui.add_space(6.0);
-        let can_save = app.entity_dirty.is_some();
+        let can_save = dirty;
         ui.horizontal(|ui| {
             if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
                 app.commit_entity_edit();
@@ -232,12 +224,7 @@ fn progression_card(ui: &mut egui::Ui, e: &ProgressionEntry) {
         });
 }
 
-fn category_row(
-    ui: &mut egui::Ui,
-    app: &CkWriterApp,
-    category: &mut String,
-    changed: &mut bool,
-) {
+fn category_row(ui: &mut egui::Ui, app: &CkWriterApp, category: &mut String) {
     ui.label("category");
     let categories: Vec<String> = app
         .book
@@ -263,19 +250,12 @@ fn category_row(
             if ui
                 .selectable_label(category.is_empty(), "(none)")
                 .clicked()
-                && !category.is_empty()
             {
                 category.clear();
-                *changed = true;
             }
             for c in &shown {
-                if ui
-                    .selectable_label(category == c, c)
-                    .clicked()
-                    && category != c
-                {
+                if ui.selectable_label(category == c, c).clicked() {
                     *category = c.clone();
-                    *changed = true;
                 }
             }
         });
@@ -287,7 +267,6 @@ fn relations_section(
     app: &CkWriterApp,
     self_id: &str,
     relations: &mut Vec<Relation>,
-    changed: &mut bool,
 ) {
     let Some(book) = app.book.as_ref() else { return };
     ui.separator();
@@ -311,8 +290,8 @@ fn relations_section(
     let mut to_remove: Option<usize> = None;
     for (idx, rel) in relations.iter_mut().enumerate() {
         ui.horizontal_wrapped(|ui| {
-            relation_kind_combo(ui, idx, &kinds, &mut rel.kind, changed);
-            relation_target_combo(ui, idx, &targets, &mut rel.id, changed);
+            relation_kind_combo(ui, idx, &kinds, &mut rel.kind);
+            relation_target_combo(ui, idx, &targets, &mut rel.id);
             if ui.small_button("\u{2715}").on_hover_text("remove").clicked() {
                 to_remove = Some(idx);
             }
@@ -334,7 +313,6 @@ fn relations_section(
     }
     if let Some(i) = to_remove {
         relations.remove(i);
-        *changed = true;
     }
 
     if ui.button("+ Add relation").clicked() {
@@ -342,17 +320,10 @@ fn relations_section(
             kind: kinds.first().cloned().unwrap_or_default(),
             id: String::new(),
         });
-        *changed = true;
     }
 }
 
-fn relation_kind_combo(
-    ui: &mut egui::Ui,
-    idx: usize,
-    kinds: &[String],
-    kind: &mut String,
-    changed: &mut bool,
-) {
+fn relation_kind_combo(ui: &mut egui::Ui, idx: usize, kinds: &[String], kind: &mut String) {
     let selected_text = if kind.is_empty() {
         "kind…".to_string()
     } else {
@@ -363,19 +334,17 @@ fn relation_kind_combo(
         .width(140.0)
         .show_ui(ui, |ui| {
             for k in kinds {
-                if ui.selectable_label(kind == k, k).clicked() && kind != k {
+                if ui.selectable_label(kind == k, k).clicked() {
                     *kind = k.clone();
-                    *changed = true;
                 }
             }
             ui.separator();
             ui.label(RichText::new("custom").small().color(theme::TEXT_MUTED));
-            if ui
-                .add(egui::TextEdit::singleline(kind).desired_width(120.0).hint_text("free text"))
-                .changed()
-            {
-                *changed = true;
-            }
+            ui.add(
+                egui::TextEdit::singleline(kind)
+                    .desired_width(120.0)
+                    .hint_text("free text"),
+            );
         });
 }
 
@@ -384,7 +353,6 @@ fn relation_target_combo(
     idx: usize,
     targets: &[(String, String)],
     target_id: &mut String,
-    changed: &mut bool,
 ) {
     let selected_label = if target_id.is_empty() {
         "target…".to_string()
@@ -400,9 +368,8 @@ fn relation_target_combo(
         .width(180.0)
         .show_ui(ui, |ui| {
             for (id, label) in targets {
-                if ui.selectable_label(target_id == id, label).clicked() && target_id != id {
+                if ui.selectable_label(target_id == id, label).clicked() {
                     *target_id = id.clone();
-                    *changed = true;
                 }
             }
         });
@@ -460,13 +427,8 @@ fn show_appearances(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str) {
     }
 }
 
-fn field(ui: &mut egui::Ui, label: &str, value: &mut String, changed: &mut bool) {
+fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {
     ui.label(label);
-    if ui
-        .add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY))
-        .changed()
-    {
-        *changed = true;
-    }
+    ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
     ui.end_row();
 }

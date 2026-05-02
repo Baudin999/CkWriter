@@ -34,7 +34,7 @@ impl EntityKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Relation {
     pub kind: String,
     pub id: String,
@@ -43,7 +43,7 @@ pub struct Relation {
 /// One snapshot of a character's state at a given chapter, captured by the AI
 /// progression run. Older entries are never rewritten — the timeline reads
 /// like a diary.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressionEntry {
     /// Chapter include-path the snapshot was taken from (e.g. "Ancient/003_Storm").
     pub chapter: String,
@@ -57,7 +57,7 @@ pub struct ProgressionEntry {
     pub notable_changes: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entity {
     pub id: String,
     #[serde(default)]

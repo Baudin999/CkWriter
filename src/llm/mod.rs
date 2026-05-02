@@ -1,4 +1,5 @@
 pub mod characters;
+pub mod conversation;
 mod parse;
 pub mod progression;
 pub mod prompts;
@@ -22,6 +23,9 @@ impl ChatMessage {
     }
     pub fn user(s: impl Into<String>) -> Self {
         Self { role: "user".into(), content: s.into() }
+    }
+    pub fn assistant(s: impl Into<String>) -> Self {
+        Self { role: "assistant".into(), content: s.into() }
     }
 }
 
