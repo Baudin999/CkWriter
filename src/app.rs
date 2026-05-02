@@ -35,11 +35,13 @@ pub struct CkWriterApp {
     pub last_error: Option<String>,
     pub ollama_ok: bool,
     pub last_ollama_check: f64,
+    pub available_models: Vec<String>,
 
     pub show_book_picker: bool,
     pub picker_path: String,
-    #[allow(dead_code)]
     pub show_settings: bool,
+    pub settings_dirty: bool,
+    pub last_settings_save: f64,
     pub import_status: Option<String>,
 
     pub notes_text: String,
@@ -79,9 +81,12 @@ impl CkWriterApp {
             last_error: None,
             ollama_ok: false,
             last_ollama_check: 0.0,
+            available_models: Vec::new(),
             show_book_picker: false,
             picker_path: String::new(),
             show_settings: false,
+            settings_dirty: false,
+            last_settings_save: 0.0,
             import_status: None,
             notes_text: String::new(),
             notes_dirty: false,
@@ -475,6 +480,7 @@ impl CkWriterApp {
         match llm::ping(&self.settings.ollama_url) {
             Ok(tags) => {
                 self.ollama_ok = !tags.is_empty();
+                self.available_models = tags;
             }
             Err(_) => {
                 self.ollama_ok = false;
@@ -579,15 +585,31 @@ impl App for CkWriterApp {
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| ui::top_bar::show(self, ui));
 
-        egui::SidePanel::left("chapters").default_width(260.0).resizable(true).show(ctx, |ui| {
-            ui::chapter_list::show(self, ui);
-        });
+        let left_resp = egui::SidePanel::left("chapters")
+            .default_width(self.settings.left_panel_width)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui::chapter_list::show(self, ui);
+            });
+        let lw = left_resp.response.rect.width();
+        if (lw - self.settings.left_panel_width).abs() > 1.0 {
+            self.settings.left_panel_width = lw;
+            self.settings_dirty = true;
+        }
 
-        egui::SidePanel::right("scope").default_width(320.0).resizable(true).show(ctx, |ui| {
-            ui::scope_panel::show(self, ui);
-            ui.separator();
-            ui::inspector::show(self, ui);
-        });
+        let right_resp = egui::SidePanel::right("scope")
+            .default_width(self.settings.right_panel_width)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui::scope_panel::show(self, ui);
+                ui.separator();
+                ui::inspector::show(self, ui);
+            });
+        let rw = right_resp.response.rect.width();
+        if (rw - self.settings.right_panel_width).abs() > 1.0 {
+            self.settings.right_panel_width = rw;
+            self.settings_dirty = true;
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.read_mode {
@@ -598,10 +620,22 @@ impl App for CkWriterApp {
         });
 
         self.book_picker(ctx);
+        ui::settings_dialog::show(self, ctx);
 
         if !self.show_book_picker && self.book.is_none() {
             // Welcome state: nudge the picker open.
             self.show_book_picker = true;
+        }
+
+        if self.settings_dirty {
+            let now = ctx.input(|i| i.time);
+            if now - self.last_settings_save > 1.0 {
+                let _ = self.settings.save();
+                self.settings_dirty = false;
+                self.last_settings_save = now;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(1100));
+            }
         }
     }
 }

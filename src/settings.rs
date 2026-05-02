@@ -12,6 +12,10 @@ pub struct Settings {
     pub recent_books: Vec<PathBuf>,
     #[serde(default = "default_font_size")]
     pub editor_font_size: f32,
+    #[serde(default = "default_left_panel_width")]
+    pub left_panel_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    pub right_panel_width: f32,
     #[serde(default)]
     pub last_book: Option<PathBuf>,
     #[serde(default)]
@@ -27,6 +31,12 @@ fn default_ollama_url() -> String {
 fn default_font_size() -> f32 {
     16.0
 }
+fn default_left_panel_width() -> f32 {
+    260.0
+}
+fn default_right_panel_width() -> f32 {
+    320.0
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -35,6 +45,8 @@ impl Default for Settings {
             ollama_url: default_ollama_url(),
             recent_books: Vec::new(),
             editor_font_size: default_font_size(),
+            left_panel_width: default_left_panel_width(),
+            right_panel_width: default_right_panel_width(),
             last_book: None,
             last_chapter: None,
         }

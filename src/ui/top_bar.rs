@@ -23,6 +23,10 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("Settings…").clicked() {
+                app.show_settings = !app.show_settings;
+            }
+            ui.separator();
             if ui.button("Open book…").clicked() {
                 app.show_book_picker = true;
             }
