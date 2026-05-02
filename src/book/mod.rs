@@ -1,8 +1,10 @@
+pub mod data;
 pub mod entity;
 pub mod latex;
 pub mod tree;
 
 use anyhow::{anyhow, Result};
+use data::BookData;
 use entity::{Entities, Entity, EntityKind};
 use std::path::{Path, PathBuf};
 use tree::FileNode;
@@ -26,6 +28,10 @@ pub struct Book {
     pub voice_prompt: String,
     pub roadmap: String,
     pub config: BookConfig,
+    // Read by the inspector / scope panel in Phase 2 (category dropdown);
+    // see book/data.rs for shape.
+    #[allow(dead_code)]
+    pub data: BookData,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -115,6 +121,7 @@ impl Book {
         }
 
         let entities = Entities::load(root);
+        let data = BookData::load(root);
 
         let voice_prompt =
             std::fs::read_to_string(root.join(&config.voice_prompt_file)).unwrap_or_default();
@@ -131,6 +138,7 @@ impl Book {
             voice_prompt,
             roadmap,
             config,
+            data,
         })
     }
 
@@ -151,6 +159,14 @@ impl Book {
 
     pub fn save_entity(&mut self, e: Entity) -> Result<()> {
         self.entities.save(&self.root, e)
+    }
+
+    // Called from the settings dialog in Phase 3 once the categories /
+    // relation-kinds editor lands; phase 1 only persists if the writer ever
+    // edits book.json by hand.
+    #[allow(dead_code)]
+    pub fn save_data(&self) -> Result<()> {
+        self.data.save(&self.root)
     }
 
     pub fn entities_of(&self, kind: EntityKind) -> Vec<&Entity> {

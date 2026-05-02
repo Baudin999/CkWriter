@@ -1,6 +1,7 @@
 use crate::app::CkWriterApp;
-use crate::book::entity::EntityKind;
+use crate::book::entity::{Entity, EntityKind};
 use crate::extract;
+use crate::llm::characters::{ProposalStatus, ProposalVerdict};
 use crate::theme;
 use egui::{Color32, RichText};
 
@@ -10,6 +11,16 @@ pub enum Tab {
     Locations,
     AI,
     Notes,
+}
+
+/// Sub-tabs inside the Characters tab. Each is its own scrollable view so
+/// long lists never break the panel layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharSubTab {
+    Personae,
+    Cast,
+    Proposals,
+    AiOutput,
 }
 
 pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
@@ -29,74 +40,720 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     ui.separator();
 
     match app.scope_tab {
-        Tab::Characters => show_kind(app, ui, EntityKind::Character),
-        Tab::Locations => show_kind(app, ui, EntityKind::Location),
+        Tab::Characters => show_characters(app, ui),
+        Tab::Locations => show_locations(app, ui),
         Tab::AI => show_ai(app, ui),
         Tab::Notes => show_notes(app, ui),
     }
 }
 
-fn show_kind(app: &mut CkWriterApp, ui: &mut egui::Ui, kind: EntityKind) {
-    let Some(_book) = &app.book else { return };
+// ─────────────────────────── Characters ────────────────────────────
 
-    if kind == EntityKind::Character {
-        let none_yet = app
-            .book
-            .as_ref()
-            .map(|b| b.entities_of(EntityKind::Character).is_empty())
-            .unwrap_or(true);
-        if none_yet {
-            ui.label(
-                RichText::new("No characters yet — seed from Info/Characters/Personae.txt:")
-                    .color(theme::TEXT_MUTED),
-            );
-            if ui.button("Import from Personae.txt").clicked() {
-                app.run_import();
-            }
-            if let Some(s) = &app.import_status {
-                ui.label(RichText::new(s).small().color(theme::TEXT_MUTED));
-            }
-            ui.separator();
-        }
+fn show_characters(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.book.is_none() {
+        return;
     }
 
-    let frequencies = extract::frequency_map(&app.entity_hits);
-    let in_scope_ids = extract::by_kind(&frequencies, kind);
+    actions_row(app, ui);
+    extraction_status(app, ui);
+    ui.add_space(4.0);
+    sub_tabs_row(app, ui);
+    ui.add_space(4.0);
 
-    if !in_scope_ids.is_empty() {
-        ui.label(RichText::new("In this chapter").small().color(theme::TEXT_MUTED));
-        for (id, count) in in_scope_ids {
-            entity_row(app, ui, id, Some(count));
+    // Cast & Personae render their own master/detail with internal scroll
+    // areas and need full horizontal width — so we don't wrap them in an
+    // outer ScrollArea. Proposals & AI Output keep the simple list layout.
+    match app.char_sub_tab {
+        CharSubTab::Personae => personae_tab(app, ui),
+        CharSubTab::Cast => cast_tab(app, ui),
+        CharSubTab::Proposals => {
+            egui::ScrollArea::vertical()
+                .id_salt("char-proposals-scroll")
+                .auto_shrink([false; 2])
+                .show(ui, |ui| proposals_tab(app, ui));
         }
-        ui.add_space(8.0);
-        ui.separator();
+        CharSubTab::AiOutput => {
+            egui::ScrollArea::vertical()
+                .id_salt("char-ai-output-scroll")
+                .auto_shrink([false; 2])
+                .show(ui, |ui| ai_output_tab(app, ui));
+        }
     }
+}
 
-    ui.label(RichText::new("All").small().color(theme::TEXT_MUTED));
-    let ids: Vec<String> = {
-        let book = app.book.as_ref().unwrap();
-        book.entities_of(kind).iter().map(|e| e.id.clone()).collect()
+fn actions_row(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    let busy = app.char_stream.is_some();
+    let can_extract = !busy && app.current_chapter.is_some() && app.ollama_ok;
+    let none_yet = app
+        .book
+        .as_ref()
+        .map(|b| b.entities_of(EntityKind::Character).is_empty())
+        .unwrap_or(true);
+
+    ui.horizontal_wrapped(|ui| {
+        ui.add_enabled_ui(can_extract, |ui| {
+            if ui.button("Find with AI").clicked() {
+                app.extract_characters_from_chapter();
+            }
+        });
+        if none_yet && ui.button("Import Personae.txt").clicked() {
+            app.run_import();
+        }
+        if ui.button("+ Add").clicked() {
+            app.create_blank_entity(EntityKind::Character);
+        }
+    });
+}
+
+fn extraction_status(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.char_stream.is_some() {
+        ui.label(RichText::new("● extracting…").small().color(theme::REVISION_VOICE));
+    } else if let Some(err) = &app.char_extract_error {
+        ui.label(RichText::new(err).small().color(Color32::LIGHT_RED));
+    } else if !app.ollama_ok {
+        ui.label(RichText::new("ollama unreachable").small().color(Color32::LIGHT_RED));
+    } else if app.current_chapter.is_none() {
+        ui.label(RichText::new("open a chapter to extract").small().color(theme::TEXT_MUTED));
+    } else if let Some(s) = &app.import_status {
+        ui.label(RichText::new(s).small().color(theme::TEXT_MUTED));
+    }
+}
+
+fn sub_tabs_row(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    let personae_count = app
+        .book
+        .as_ref()
+        .map(|b| b.entities_of(EntityKind::Character).len())
+        .unwrap_or(0);
+    let cast_count = extract::by_kind(
+        &extract::frequency_map(&app.entity_hits),
+        EntityKind::Character,
+    )
+    .len();
+    let new_count = app
+        .char_proposals
+        .iter()
+        .filter(|p| {
+            p.status == ProposalStatus::Pending && matches!(p.verdict, ProposalVerdict::New)
+        })
+        .count();
+    let pending_count = app
+        .char_proposals
+        .iter()
+        .filter(|p| p.status == ProposalStatus::Pending)
+        .count();
+
+    ui.horizontal_wrapped(|ui| {
+        sub_tab_button(
+            ui,
+            &mut app.char_sub_tab,
+            CharSubTab::Cast,
+            "Cast",
+            count_suffix(cast_count),
+            None,
+        );
+        sub_tab_button(
+            ui,
+            &mut app.char_sub_tab,
+            CharSubTab::Personae,
+            "Personae",
+            count_suffix(personae_count),
+            None,
+        );
+        let badge = if new_count > 0 {
+            Some((format!("{new_count} new"), theme::ACCENT))
+        } else if pending_count > 0 {
+            Some((format!("{pending_count}"), theme::TEXT_MUTED))
+        } else {
+            None
+        };
+        sub_tab_button(
+            ui,
+            &mut app.char_sub_tab,
+            CharSubTab::Proposals,
+            "Proposals",
+            String::new(),
+            badge,
+        );
+        sub_tab_button(
+            ui,
+            &mut app.char_sub_tab,
+            CharSubTab::AiOutput,
+            "AI Output",
+            String::new(),
+            None,
+        );
+    });
+}
+
+fn sub_tab_button(
+    ui: &mut egui::Ui,
+    state: &mut CharSubTab,
+    target: CharSubTab,
+    label: &str,
+    count_suffix: String,
+    badge: Option<(String, Color32)>,
+) {
+    let selected = *state == target;
+    let mut text = RichText::new(format!("{label}{count_suffix}")).strong();
+    if !selected {
+        text = text.color(theme::TEXT_MUTED);
+    }
+    let mut clicked = ui.selectable_label(selected, text).clicked();
+    if let Some((badge_text, color)) = badge {
+        let resp = ui.label(
+            RichText::new(badge_text)
+                .small()
+                .color(Color32::BLACK)
+                .background_color(color),
+        );
+        clicked |= resp.clicked();
+    }
+    if clicked {
+        *state = target;
+    }
+}
+
+fn count_suffix(n: usize) -> String {
+    if n == 0 {
+        String::new()
+    } else {
+        format!(" ({n})")
+    }
+}
+
+// ─────────────────────────── Master / detail shared ───────────────
+
+/// One master-list row entry. `count` is set for Cast (chapter-frequency),
+/// `None` for Personae.
+struct MasterRow {
+    id: String,
+    name: String,
+    aliases: Vec<String>,
+    category: String,
+    count: Option<usize>,
+}
+
+fn name_matches(query: &str, name: &str, aliases: &[String]) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    if name.to_lowercase().contains(&q) {
+        return true;
+    }
+    aliases.iter().any(|a| a.to_lowercase().contains(&q))
+}
+
+fn search_input(ui: &mut egui::Ui, query: &mut String) {
+    ui.add(
+        egui::TextEdit::singleline(query)
+            .hint_text("search…")
+            .desired_width(f32::INFINITY),
+    );
+}
+
+fn master_row(ui: &mut egui::Ui, selected: bool, row: &MasterRow) -> bool {
+    let bg = if selected {
+        theme::BG_INSET
+    } else {
+        Color32::TRANSPARENT
     };
-    for id in ids {
-        entity_row(app, ui, &id, None);
+    let resp = egui::Frame::group(ui.style())
+        .fill(bg)
+        .inner_margin(egui::Margin::symmetric(6, 4))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, |ui| {
+            // Always claim the full master-column width so cards line up
+            // regardless of whether the row has trailing right-aligned content.
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&row.name)
+                        .color(theme::ENTITY_CHARACTER)
+                        .strong(),
+                );
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if let Some(c) = row.count {
+                            ui.label(
+                                RichText::new(format!("\u{00D7}{c}"))
+                                    .small()
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        }
+                    },
+                );
+            });
+            if !row.aliases.is_empty() {
+                ui.label(
+                    RichText::new(row.aliases.join(", "))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+            }
+            if !row.category.is_empty() {
+                ui.label(
+                    RichText::new(&row.category)
+                        .small()
+                        .color(theme::TEXT_MUTED)
+                        .italics(),
+                );
+            }
+        })
+        .response
+        .interact(egui::Sense::click());
+    resp.clicked()
+}
+
+/// Render the right-hand detail column for the currently-selected entity.
+/// `entity` is pre-cloned so the inner closure doesn't have to re-borrow
+/// app.book while app is also borrowed mutably for inspector edits.
+fn detail_column(app: &mut CkWriterApp, ui: &mut egui::Ui, entity: Option<&Entity>) {
+    egui::ScrollArea::vertical()
+        .id_salt("master-detail-scroll")
+        .auto_shrink([false; 2])
+        .show(ui, |ui| match entity {
+            Some(e) => crate::ui::inspector::render_detail(app, ui, e),
+            None => empty_state(
+                ui,
+                "Pick a character",
+                "Click someone in the list to see their details.",
+            ),
+        });
+}
+
+fn master_list_width(ui: &egui::Ui) -> f32 {
+    (ui.available_width() * 0.38).clamp(180.0, 280.0)
+}
+
+// ─────────────────────────── Personae sub-tab ──────────────────────
+
+fn personae_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    // Gather data first (immutable book read), so the layout closures can
+    // re-borrow `app` mutably one at a time without nested-borrow conflicts.
+    let Some(book) = app.book.as_ref() else { return };
+    let mut rows: Vec<MasterRow> = book
+        .entities_of(EntityKind::Character)
+        .iter()
+        .map(|e| MasterRow {
+            id: e.id.clone(),
+            name: e.name.clone(),
+            aliases: e.aliases.clone(),
+            category: e.category.clone(),
+            count: None,
+        })
+        .collect();
+
+    if rows.is_empty() {
+        empty_state(
+            ui,
+            "No characters yet.",
+            "Run Find with AI on a chapter, or import from Personae.txt.",
+        );
+        return;
     }
 
-    ui.add_space(12.0);
-    if ui.button(format!("+ Add {}", kind_singular(kind))).clicked() {
-        app.create_blank_entity(kind);
+    let category_order: Vec<String> = book.data.categories.clone();
+    let any_categorised = rows.iter().any(|r| !r.category.is_empty());
+
+    let query = app.character_search.clone();
+    if !query.is_empty() {
+        rows.retain(|r| name_matches(&query, &r.name, &r.aliases));
+    }
+
+    let selected_id = app.selected_entity.clone();
+    let detail_entity: Option<Entity> = selected_id
+        .as_ref()
+        .and_then(|id| book.entity(id).cloned());
+
+    master_detail_layout(app, ui, |ui, app| {
+        // Master column
+        search_input(ui, &mut app.character_search);
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("personae-list-scroll")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.label(
+                        RichText::new("no matches")
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                    return;
+                }
+                let group = any_categorised && query.is_empty();
+                if group {
+                    let buckets: Vec<String> = category_order
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once("Uncategorised".to_string()))
+                        .collect();
+                    for cat in &buckets {
+                        let in_bucket: Vec<&MasterRow> = rows
+                            .iter()
+                            .filter(|r| {
+                                if cat == "Uncategorised" {
+                                    r.category.is_empty()
+                                } else {
+                                    &r.category == cat
+                                }
+                            })
+                            .collect();
+                        if in_bucket.is_empty() {
+                            continue;
+                        }
+                        ui.label(
+                            RichText::new(format!("{cat}  ({})", in_bucket.len()))
+                                .small()
+                                .color(theme::TEXT_MUTED)
+                                .strong(),
+                        );
+                        for r in in_bucket {
+                            let sel = selected_id.as_deref() == Some(r.id.as_str());
+                            if master_row(ui, sel, r) {
+                                app.selected_entity = Some(r.id.clone());
+                            }
+                        }
+                        ui.add_space(4.0);
+                    }
+                } else {
+                    for r in &rows {
+                        let sel = selected_id.as_deref() == Some(r.id.as_str());
+                        if master_row(ui, sel, r) {
+                            app.selected_entity = Some(r.id.clone());
+                        }
+                    }
+                }
+            });
+    }, detail_entity);
+}
+
+// ─────────────────────────── Cast sub-tab ──────────────────────────
+
+fn cast_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.current_chapter.is_none() {
+        empty_state(ui, "No chapter open.", "Open a chapter to see its cast.");
+        return;
+    }
+    let frequencies = extract::frequency_map(&app.entity_hits);
+    let in_scope = extract::by_kind(&frequencies, EntityKind::Character);
+    if in_scope.is_empty() {
+        empty_state(
+            ui,
+            "No known characters detected in this chapter.",
+            "Either nobody is named yet, or the matcher hasn't been built for these characters.",
+        );
+        return;
+    }
+
+    let Some(book) = app.book.as_ref() else { return };
+    let mut rows: Vec<MasterRow> = in_scope
+        .iter()
+        .filter_map(|(id, count)| {
+            book.entity(id).map(|e| MasterRow {
+                id: e.id.clone(),
+                name: e.name.clone(),
+                aliases: e.aliases.clone(),
+                category: e.category.clone(),
+                count: Some(*count),
+            })
+        })
+        .collect();
+
+    let query = app.character_search.clone();
+    if !query.is_empty() {
+        rows.retain(|r| name_matches(&query, &r.name, &r.aliases));
+    }
+
+    let selected_id = app.selected_entity.clone();
+    let detail_entity: Option<Entity> = selected_id
+        .as_ref()
+        .and_then(|id| book.entity(id).cloned());
+
+    master_detail_layout(app, ui, |ui, app| {
+        search_input(ui, &mut app.character_search);
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("cast-list-scroll")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.label(
+                        RichText::new("no matches")
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                    return;
+                }
+                for r in &rows {
+                    let sel = selected_id.as_deref() == Some(r.id.as_str());
+                    if master_row(ui, sel, r) {
+                        app.selected_entity = Some(r.id.clone());
+                    }
+                }
+            });
+    }, detail_entity);
+}
+
+/// Two-column layout shared by Cast & Personae. Caller provides the master
+/// column body; `detail_entity` (pre-cloned) drives the right column.
+fn master_detail_layout(
+    app: &mut CkWriterApp,
+    ui: &mut egui::Ui,
+    master: impl FnOnce(&mut egui::Ui, &mut CkWriterApp),
+    detail_entity: Option<Entity>,
+) {
+    let list_w = master_list_width(ui);
+    let total_h = ui.available_height();
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(list_w, total_h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                master(ui, app);
+            },
+        );
+        ui.separator();
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), total_h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                detail_column(app, ui, detail_entity.as_ref());
+            },
+        );
+    });
+}
+
+// ─────────────────────────── Proposals sub-tab ─────────────────────
+
+fn proposals_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.char_proposals.is_empty() {
+        empty_state(
+            ui,
+            "No proposals yet.",
+            "Click Find with AI above to extract characters from the open chapter.",
+        );
+        return;
+    }
+
+    let pending: Vec<usize> = app
+        .char_proposals
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.status == ProposalStatus::Pending)
+        .map(|(i, _)| i)
+        .collect();
+    let new_pending: usize = pending
+        .iter()
+        .filter(|&&i| matches!(app.char_proposals[i].verdict, ProposalVerdict::New))
+        .count();
+    let dup_pending: usize = pending.len() - new_pending;
+    let added: usize = app
+        .char_proposals
+        .iter()
+        .filter(|p| p.status == ProposalStatus::Added)
+        .count();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "{new_pending} new · {dup_pending} dup · {added} added"
+            ))
+            .small()
+            .color(theme::TEXT_MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("clear").clicked() {
+                app.clear_char_proposals();
+            }
+            ui.add_enabled_ui(new_pending > 0, |ui| {
+                if ui
+                    .button(RichText::new(format!("+ Add all {new_pending} new")).strong())
+                    .clicked()
+                {
+                    app.accept_all_new_char_proposals();
+                }
+            });
+        });
+    });
+    ui.add_space(4.0);
+
+    let mut accept_idx: Option<usize> = None;
+    let mut dismiss_idx: Option<usize> = None;
+    for (idx, p) in app.char_proposals.iter().enumerate() {
+        if p.status == ProposalStatus::Dismissed {
+            continue;
+        }
+        proposal_card(ui, idx, p, &mut accept_idx, &mut dismiss_idx);
+    }
+    if let Some(i) = accept_idx {
+        app.accept_char_proposal(i);
+    }
+    if let Some(i) = dismiss_idx {
+        app.dismiss_char_proposal(i);
     }
 }
 
-fn kind_singular(k: EntityKind) -> &'static str {
-    match k {
-        EntityKind::Character => "character",
-        EntityKind::Location => "location",
-        EntityKind::Event => "event",
-        EntityKind::Timeline => "timeline entry",
-    }
+fn proposal_card(
+    ui: &mut egui::Ui,
+    idx: usize,
+    p: &crate::llm::characters::ProposedCharacter,
+    accept_idx: &mut Option<usize>,
+    dismiss_idx: &mut Option<usize>,
+) {
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&p.raw.name).strong().color(theme::TEXT_PRIMARY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    verdict_chip(ui, &p.verdict, p.status);
+                });
+            });
+            if !p.raw.aliases.is_empty() {
+                ui.label(
+                    RichText::new(format!("aka {}", p.raw.aliases.join(", ")))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+            }
+            if !p.raw.role.is_empty() {
+                ui.label(RichText::new(&p.raw.role).small());
+            }
+            if !p.raw.evidence.is_empty() {
+                ui.label(
+                    RichText::new(format!("\u{201C}{}\u{201D}", short(&p.raw.evidence, 100)))
+                        .italics()
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+            }
+            ui.horizontal(|ui| {
+                let already_added = p.status == ProposalStatus::Added;
+                let is_dup = matches!(p.verdict, ProposalVerdict::Duplicate { .. });
+                let can_add = !already_added && !is_dup;
+                if ui.add_enabled(can_add, egui::Button::new("Add")).clicked() {
+                    *accept_idx = Some(idx);
+                }
+                if !already_added && ui.button("Dismiss").clicked() {
+                    *dismiss_idx = Some(idx);
+                }
+            });
+        });
 }
 
-fn entity_row(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str, count: Option<usize>) {
+fn verdict_chip(ui: &mut egui::Ui, verdict: &ProposalVerdict, status: ProposalStatus) {
+    let (label, fg, bg) = match (verdict, status) {
+        (_, ProposalStatus::Added) => (
+            "added".to_string(),
+            Color32::BLACK,
+            theme::ENTITY_CHARACTER,
+        ),
+        (ProposalVerdict::New, _) => ("new".to_string(), Color32::BLACK, theme::ACCENT),
+        (ProposalVerdict::Duplicate { entity_name }, _) => (
+            format!("dup · {entity_name}"),
+            theme::TEXT_PRIMARY,
+            theme::BG_INSET,
+        ),
+    };
+    ui.label(
+        RichText::new(label)
+            .small()
+            .color(fg)
+            .background_color(bg),
+    );
+}
+
+// ─────────────────────────── AI Output sub-tab ─────────────────────
+
+fn ai_output_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if let Some(s) = &app.char_stream {
+        ui.label(
+            RichText::new("● live extraction")
+                .small()
+                .color(theme::REVISION_VOICE),
+        );
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(&s.buffer)
+                .monospace()
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+        return;
+    }
+    let Some(buf) = app.last_char_buffer.clone() else {
+        empty_state(
+            ui,
+            "No AI run yet.",
+            "Click Find with AI to send the chapter prose to the model.",
+        );
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{} bytes", buf.len()))
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("copy").clicked() {
+                ui.ctx().copy_text(buf.clone());
+            }
+        });
+    });
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(&buf)
+            .monospace()
+            .small()
+            .color(theme::TEXT_MUTED),
+    );
+}
+
+// ─────────────────────────── Locations / AI / Notes ────────────────
+
+fn show_locations(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.book.is_none() {
+        return;
+    }
+    let frequencies = extract::frequency_map(&app.entity_hits);
+    let in_scope = extract::by_kind(&frequencies, EntityKind::Location);
+    egui::ScrollArea::vertical()
+        .id_salt("locations-scroll")
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            if !in_scope.is_empty() {
+                ui.label(RichText::new("In this chapter").small().color(theme::TEXT_MUTED));
+                for (id, count) in in_scope {
+                    location_row(app, ui, id, Some(count));
+                }
+                ui.add_space(8.0);
+                ui.separator();
+            }
+            ui.label(RichText::new("All").small().color(theme::TEXT_MUTED));
+            let ids: Vec<String> = {
+                let book = app.book.as_ref().unwrap();
+                book.entities_of(EntityKind::Location)
+                    .iter()
+                    .map(|e| e.id.clone())
+                    .collect()
+            };
+            for id in ids {
+                location_row(app, ui, &id, None);
+            }
+            ui.add_space(12.0);
+            if ui.button("+ Add location").clicked() {
+                app.create_blank_entity(EntityKind::Location);
+            }
+        });
+}
+
+fn location_row(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str, count: Option<usize>) {
     let Some(book) = &app.book else { return };
     let Some(e) = book.entity(id) else { return };
     let label = match count {
@@ -168,39 +825,52 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
 
     let mut accept_id: Option<u32> = None;
     let mut dismiss_id: Option<u32> = None;
-    for rev in &app.revisions {
-        if rev.status != crate::llm::revision::RevisionStatus::Pending {
-            continue;
-        }
-        let color = match rev.pipeline {
-            crate::llm::prompts::Pipeline::Voice => theme::REVISION_VOICE,
-            crate::llm::prompts::Pipeline::ShowDontTell => theme::REVISION_SHOW,
-            crate::llm::prompts::Pipeline::Prose => theme::REVISION_PROSE,
-        };
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(rev.pipeline.label()).color(color).strong());
-                if rev.anchor.is_none() {
-                    ui.label(RichText::new("(unanchored)").small().color(Color32::LIGHT_RED));
+    egui::ScrollArea::vertical()
+        .id_salt("revisions-scroll")
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            for rev in &app.revisions {
+                if rev.status != crate::llm::revision::RevisionStatus::Pending {
+                    continue;
                 }
-            });
-            ui.label(RichText::new(format!("\"{}\"", short(&rev.quote))).italics().color(theme::TEXT_MUTED));
-            ui.label(&rev.why);
-            if !rev.suggestion.is_empty() {
-                ui.label(RichText::new(&rev.suggestion).color(Color32::WHITE));
+                let color = match rev.pipeline {
+                    crate::llm::prompts::Pipeline::Voice => theme::REVISION_VOICE,
+                    crate::llm::prompts::Pipeline::ShowDontTell => theme::REVISION_SHOW,
+                    crate::llm::prompts::Pipeline::Prose => theme::REVISION_PROSE,
+                };
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(rev.pipeline.label()).color(color).strong());
+                        if rev.anchor.is_none() {
+                            ui.label(
+                                RichText::new("(unanchored)")
+                                    .small()
+                                    .color(Color32::LIGHT_RED),
+                            );
+                        }
+                    });
+                    ui.label(
+                        RichText::new(format!("\"{}\"", short(&rev.quote, 80)))
+                            .italics()
+                            .color(theme::TEXT_MUTED),
+                    );
+                    ui.label(&rev.why);
+                    if !rev.suggestion.is_empty() {
+                        ui.label(RichText::new(&rev.suggestion).color(Color32::WHITE));
+                    }
+                    ui.horizontal(|ui| {
+                        if rev.suggestion.is_empty() || rev.anchor.is_none() {
+                            ui.add_enabled(false, egui::Button::new("Accept"));
+                        } else if ui.button("Accept").clicked() {
+                            accept_id = Some(rev.id);
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            dismiss_id = Some(rev.id);
+                        }
+                    });
+                });
             }
-            ui.horizontal(|ui| {
-                if rev.suggestion.is_empty() || rev.anchor.is_none() {
-                    ui.add_enabled(false, egui::Button::new("Accept"));
-                } else if ui.button("Accept").clicked() {
-                    accept_id = Some(rev.id);
-                }
-                if ui.button("Dismiss").clicked() {
-                    dismiss_id = Some(rev.id);
-                }
-            });
         });
-    }
     if let Some(id) = accept_id {
         app.accept_revision(id);
     }
@@ -218,7 +888,9 @@ fn show_notes(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     let mut changed = false;
     let resp = ui.add_sized(
         ui.available_size(),
-        egui::TextEdit::multiline(&mut app.notes_text).desired_rows(20).hint_text("scratchpad — saved next to the chapter as .notes.md"),
+        egui::TextEdit::multiline(&mut app.notes_text)
+            .desired_rows(20)
+            .hint_text("scratchpad — saved next to the chapter as .notes.md"),
     );
     if resp.changed() {
         changed = true;
@@ -231,10 +903,18 @@ fn show_notes(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     }
 }
 
-fn short(s: &str) -> String {
-    let mut t: String = s.chars().take(80).collect();
-    if s.chars().count() > 80 {
-        t.push('…');
+// ─────────────────────────── shared helpers ────────────────────────
+
+fn short(s: &str, n: usize) -> String {
+    let mut t: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        t.push('\u{2026}');
     }
     t
+}
+
+fn empty_state(ui: &mut egui::Ui, headline: &str, hint: &str) {
+    ui.add_space(8.0);
+    ui.label(RichText::new(headline).color(theme::TEXT_MUTED).strong());
+    ui.label(RichText::new(hint).small().color(theme::TEXT_MUTED));
 }

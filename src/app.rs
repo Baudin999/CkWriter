@@ -1,7 +1,9 @@
-use crate::book::entity::{slugify, Entity, EntityKind};
+use crate::book::entity::{mirror_diff, slugify, Entity, EntityKind, MirrorOp, Relation};
 use crate::book::{latex, Book, Chapter};
 use crate::extract::{EntityHit, EntityMatcher};
+use crate::index::CrossChapterIndex;
 use crate::llm;
+use crate::llm::characters::{ProposalStatus, ProposedCharacter};
 use crate::llm::prompts::Pipeline;
 use crate::llm::revision::{Revision, RevisionStatus};
 use crate::pdf;
@@ -24,14 +26,35 @@ pub struct CkWriterApp {
     pub entity_hits: Vec<EntityHit>,
 
     pub scope_tab: ui::scope_panel::Tab,
+    pub char_sub_tab: ui::scope_panel::CharSubTab,
     pub selected_entity: Option<String>,
     pub entity_dirty: Option<Entity>,
+    /// Search filter shared by Cast / Personae master lists.
+    pub character_search: String,
 
     pub stream: Option<llm::StreamHandle>,
     pub stream_pipeline: Option<Pipeline>,
     pub last_stream_buffer: Option<String>,
     pub revisions: Vec<Revision>,
     pub next_rev_id: u32,
+
+    /// Separate stream so character extraction never collides with the
+    /// voice/show/prose coaching pipelines.
+    pub char_stream: Option<llm::StreamHandle>,
+    pub last_char_buffer: Option<String>,
+    pub char_proposals: Vec<ProposedCharacter>,
+    pub char_extract_error: Option<String>,
+
+    /// Per-character progression run. Independent of char/coach streams so
+    /// the writer can fire one without blocking other AI work.
+    pub progression_stream: Option<llm::StreamHandle>,
+    /// (entity_id, chapter_include_path) — what the in-flight stream is for.
+    pub progression_target: Option<(String, String)>,
+    pub progression_status: Option<String>,
+    /// Cross-chapter occurrence index. Rebuilt lazily after entity edits or
+    /// chapter saves so the inspector can show "Appears in N chapters".
+    pub char_index: Option<CrossChapterIndex>,
+
     pub last_error: Option<String>,
     pub ollama_ok: bool,
     pub last_ollama_check: f64,
@@ -79,13 +102,23 @@ impl CkWriterApp {
             dirty: false,
             entity_hits: Vec::new(),
             scope_tab: ui::scope_panel::Tab::Characters,
+            char_sub_tab: ui::scope_panel::CharSubTab::Cast,
             selected_entity: None,
             entity_dirty: None,
+            character_search: String::new(),
             stream: None,
             stream_pipeline: None,
             last_stream_buffer: None,
             revisions: Vec::new(),
             next_rev_id: 1,
+            char_stream: None,
+            last_char_buffer: None,
+            char_proposals: Vec::new(),
+            char_extract_error: None,
+            progression_stream: None,
+            progression_target: None,
+            progression_status: None,
+            char_index: None,
             last_error: None,
             ollama_ok: false,
             last_ollama_check: 0.0,
@@ -163,6 +196,15 @@ impl CkWriterApp {
         self.notes_text.clear();
         self.notes_dirty = false;
         self.notes_path = None;
+        self.char_stream = None;
+        self.last_char_buffer = None;
+        self.char_proposals.clear();
+        self.char_extract_error = None;
+        self.progression_stream = None;
+        self.progression_target = None;
+        self.progression_status = None;
+        self.char_index = None;
+        self.rebuild_char_index();
         self.settings.touch_recent(root);
         if let Some(model) = self
             .book
@@ -234,6 +276,9 @@ impl CkWriterApp {
         };
         std::fs::write(&ch.file_path, &self.editor_text)?;
         self.dirty = false;
+        // Cross-chapter index reads from disk; refresh it so the just-saved
+        // chapter's edits are reflected in the inspector's "Appears in" list.
+        self.rebuild_char_index();
         Ok(())
     }
 
@@ -253,6 +298,7 @@ impl CkWriterApp {
                 book.reload_entities();
                 self.matcher = Some(EntityMatcher::build(&book.entities));
                 self.refresh_entity_hits();
+                self.rebuild_char_index();
             }
             Err(e) => {
                 self.import_status = Some(format!("import failed: {e}"));
@@ -275,6 +321,7 @@ impl CkWriterApp {
         let _ = book.save_entity(e);
         self.matcher = Some(EntityMatcher::build(&book.entities));
         self.refresh_entity_hits();
+        self.rebuild_char_index();
         self.selected_entity = Some(id);
     }
 
@@ -293,12 +340,344 @@ impl CkWriterApp {
                 book.entities.by_id.remove(&original_id);
             }
         }
+
+        // Snapshot prior relations so we can mirror inverses on save.
+        let prev_relations = book
+            .entity(&original_id)
+            .map(|p| p.relations.clone())
+            .unwrap_or_default();
+        // Drop relations whose target no longer exists or that point at self;
+        // serde-default + manual edits to book.json could otherwise leave dangling pointers.
+        e.relations.retain(|r| {
+            let id = r.id.trim();
+            !id.is_empty() && id != e.id && book.entity(id).is_some()
+        });
+        let new_relations = e.relations.clone();
+        let saved_id = e.id.clone();
+
         if let Err(err) = book.save_entity(e) {
             self.last_error = Some(format!("save entity: {err}"));
             return;
         }
+
+        let inverse_fn = |k: &str| book.data.inverse_relation(k);
+        let ops = mirror_diff(&prev_relations, &new_relations, &saved_id, inverse_fn);
+        for op in ops {
+            if let Err(err) = apply_mirror_op(book, &saved_id, op) {
+                log::warn!("mirror relation op failed: {err}");
+            }
+        }
+
         self.matcher = Some(EntityMatcher::build(&book.entities));
         self.refresh_entity_hits();
+        self.rebuild_char_index();
+    }
+
+    pub fn rebuild_char_index(&mut self) {
+        let (Some(book), Some(matcher)) = (self.book.as_ref(), self.matcher.as_ref()) else {
+            self.char_index = None;
+            return;
+        };
+        let start = std::time::Instant::now();
+        let chapter_count = book.chapters.len();
+        let idx = CrossChapterIndex::build(book, matcher);
+        log::info!(
+            "char index rebuilt in {:?}: chapters={chapter_count} indexed_entities={} total_occurrences={}",
+            start.elapsed(),
+            idx.entity_count(),
+            idx.total_occurrences_all(),
+        );
+        self.char_index = Some(idx);
+    }
+
+    /// Send the current chapter's prose to ollama and ask it to extract every
+    /// named character. Result is parsed and diffed against the entity DB
+    /// when the stream completes.
+    pub fn extract_characters_from_chapter(&mut self) {
+        if self.char_stream.is_some() {
+            log::debug!("character extraction already in flight, ignoring re-trigger");
+            return;
+        }
+        if self.book.is_none() {
+            self.char_extract_error = Some("open a book first".into());
+            return;
+        }
+        let prose = latex::to_prose(&self.editor_text);
+        if prose.trim().is_empty() {
+            self.char_extract_error = Some("nothing to extract from".into());
+            return;
+        }
+        let chapter_label = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.display_title.as_str())
+            .unwrap_or("<no chapter>");
+        log::info!(
+            "character extraction start: chapter={chapter_label:?} prose_chars={} model={}",
+            prose.chars().count(),
+            self.settings.model,
+        );
+        let messages = vec![
+            llm::ChatMessage::system(llm::characters::SYSTEM_PROMPT.to_string()),
+            llm::ChatMessage::user(llm::characters::build_user(&prose)),
+        ];
+        // Long chapters can run 90KB+ of prose. The default 8k context window
+        // truncates the system message before the model ever reads it, leading
+        // to a free-form review instead of JSON. 32k tokens fits any chapter
+        // we've seen and is well within gemma3's supported window.
+        let tuning = llm::ChatTuning {
+            num_ctx: 32_768,
+            num_predict: 4_096,
+            ..Default::default()
+        };
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            true,
+            tuning,
+        );
+        self.char_stream = Some(handle);
+        self.char_extract_error = None;
+        // Don't drop existing proposals until we know the new extraction
+        // succeeded; user may still be reviewing them.
+    }
+
+    pub fn poll_char_extract_stream(&mut self) {
+        let Some(stream) = self.char_stream.as_mut() else { return };
+        let _ = stream.poll();
+        if !stream.done {
+            return;
+        }
+        let buffer = std::mem::take(&mut stream.buffer);
+        let err = stream.error.take();
+        self.char_stream = None;
+        self.last_char_buffer = Some(buffer.clone());
+        if let Some(e) = err {
+            log::error!("character extraction stream error: {e}");
+            self.char_extract_error = Some(e);
+            return;
+        }
+        let Some(book) = &self.book else { return };
+        match llm::characters::parse_characters(&buffer) {
+            Some(raw) => {
+                let count = raw.characters.len();
+                let proposals = llm::characters::diff_against_entities(raw, &book.entities);
+                let new_count = proposals
+                    .iter()
+                    .filter(|p| {
+                        matches!(p.verdict, llm::characters::ProposalVerdict::New)
+                    })
+                    .count();
+                let dup_count = proposals.len() - new_count;
+                log::info!(
+                    "character extraction parsed: raw={count} proposals={} new={new_count} duplicates={dup_count}",
+                    proposals.len()
+                );
+                if proposals.is_empty() {
+                    self.char_extract_error = Some(format!(
+                        "extraction returned {count} candidate(s) but none survived dedup"
+                    ));
+                }
+                self.char_proposals = proposals;
+            }
+            None => {
+                log::warn!(
+                    "character extraction: could not parse JSON ({} bytes returned)",
+                    buffer.len()
+                );
+                self.char_extract_error =
+                    Some("could not parse JSON from model response (see log)".into());
+            }
+        }
+    }
+
+    pub fn accept_char_proposal(&mut self, idx: usize) {
+        let Some(book) = self.book.as_mut() else { return };
+        let Some(p) = self.char_proposals.get_mut(idx) else { return };
+        if p.status != ProposalStatus::Pending {
+            return;
+        }
+        let first_seen = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.display_title.clone())
+            .unwrap_or_default();
+        let entity = llm::characters::build_entity(&p.raw, &book.entities, &first_seen);
+        let entity_id = entity.id.clone();
+        let entity_name = entity.name.clone();
+        if let Err(err) = book.save_entity(entity) {
+            log::error!(
+                "save proposed character {entity_id:?} ({entity_name:?}) failed: {err}"
+            );
+            self.last_error = Some(format!("save proposed character: {err}"));
+            return;
+        }
+        log::info!(
+            "character proposal accepted: id={entity_id:?} name={entity_name:?} first_seen={first_seen:?}"
+        );
+        p.status = ProposalStatus::Added;
+        self.matcher = Some(EntityMatcher::build(&book.entities));
+        self.refresh_entity_hits();
+        self.rebuild_char_index();
+    }
+
+    pub fn dismiss_char_proposal(&mut self, idx: usize) {
+        if let Some(p) = self.char_proposals.get_mut(idx) {
+            p.status = ProposalStatus::Dismissed;
+        }
+    }
+
+    /// Accept every Pending proposal whose verdict is `New`. Duplicates and
+    /// already-handled rows are left alone.
+    pub fn accept_all_new_char_proposals(&mut self) {
+        let indices: Vec<usize> = self
+            .char_proposals
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.status == ProposalStatus::Pending
+                    && matches!(p.verdict, crate::llm::characters::ProposalVerdict::New)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        log::info!("accepting {} new character proposals in bulk", indices.len());
+        for i in indices {
+            self.accept_char_proposal(i);
+        }
+    }
+
+    pub fn clear_char_proposals(&mut self) {
+        self.char_proposals.clear();
+        self.char_extract_error = None;
+    }
+
+    /// Kick off the per-character progression run for the selected character
+    /// against the current chapter. Auto-commits the entity dirty buffer first
+    /// if it targets the same character — otherwise the AI append would be
+    /// clobbered when the user later clicks Save on a stale form.
+    pub fn track_progression_for(&mut self, entity_id: &str) {
+        if self.progression_stream.is_some() {
+            self.progression_status = Some("progression run already in flight".into());
+            return;
+        }
+        if !self.ollama_ok {
+            self.progression_status = Some("ollama unreachable".into());
+            return;
+        }
+        let Some(ch) = self.current_chapter.clone() else {
+            self.progression_status = Some("open a chapter first".into());
+            return;
+        };
+        let prose = latex::to_prose(&self.editor_text);
+        if prose.trim().is_empty() {
+            self.progression_status = Some("nothing to analyse".into());
+            return;
+        }
+
+        if self
+            .entity_dirty
+            .as_ref()
+            .map(|d| d.id == entity_id)
+            .unwrap_or(false)
+        {
+            self.commit_entity_edit();
+        }
+
+        let Some(book) = self.book.as_ref() else { return };
+        let Some(entity) = book.entity(entity_id).cloned() else {
+            self.progression_status = Some("character not found".into());
+            return;
+        };
+
+        let last = entity.progression.last().map(|p| {
+            crate::llm::progression::LastSnapshot {
+                chapter: p.chapter.clone(),
+                voice_summary: p.voice_summary.clone(),
+                notable_changes: p.notable_changes.clone(),
+            }
+        });
+        let user_prompt = crate::llm::progression::build_user(
+            &entity.name,
+            &entity.aliases,
+            &entity.voice_notes,
+            last.as_ref(),
+            &ch.include_path,
+            &prose,
+        );
+        let messages = vec![
+            llm::ChatMessage::system(crate::llm::progression::SYSTEM_PROMPT.to_string()),
+            llm::ChatMessage::user(user_prompt),
+        ];
+        let tuning = llm::ChatTuning {
+            num_ctx: 32_768,
+            num_predict: 1_024,
+            ..Default::default()
+        };
+        log::info!(
+            "progression run start: entity={entity_id:?} chapter={:?} prose_chars={}",
+            ch.include_path,
+            prose.chars().count()
+        );
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            true,
+            tuning,
+        );
+        self.progression_stream = Some(handle);
+        self.progression_target = Some((entity_id.to_string(), ch.include_path.clone()));
+        self.progression_status = Some("extracting…".into());
+    }
+
+    pub fn poll_progression_stream(&mut self) {
+        let Some(stream) = self.progression_stream.as_mut() else { return };
+        let _ = stream.poll();
+        if !stream.done {
+            return;
+        }
+        let buffer = std::mem::take(&mut stream.buffer);
+        let err = stream.error.take();
+        self.progression_stream = None;
+        let Some((entity_id, chapter)) = self.progression_target.take() else { return };
+        if let Some(e) = err {
+            log::error!("progression stream error: {e}");
+            self.progression_status = Some(format!("error: {e}"));
+            return;
+        }
+        let Some(raw) = crate::llm::progression::parse(&buffer) else {
+            log::warn!(
+                "progression: could not parse JSON ({} bytes returned)",
+                buffer.len()
+            );
+            self.progression_status =
+                Some("could not parse JSON from model response (see log)".into());
+            return;
+        };
+        if raw.is_empty() {
+            log::info!(
+                "progression: model returned empty snapshot for {entity_id:?} in {chapter:?} — character likely absent"
+            );
+            self.progression_status = Some("character not present in this chapter".into());
+            return;
+        }
+        let Some(book) = self.book.as_mut() else { return };
+        let Some(mut entity) = book.entity(&entity_id).cloned() else { return };
+        entity.progression.push(crate::book::entity::ProgressionEntry {
+            chapter: chapter.clone(),
+            tone: raw.tone.trim().to_string(),
+            situation: raw.situation.trim().to_string(),
+            voice_summary: raw.voice_summary.trim().to_string(),
+            notable_changes: raw.notable_changes.trim().to_string(),
+        });
+        if let Err(err) = book.save_entity(entity) {
+            log::error!("progression save_entity failed: {err}");
+            self.progression_status = Some(format!("save failed: {err}"));
+            return;
+        }
+        log::info!("progression: appended snapshot for {entity_id:?} in {chapter:?}");
+        self.progression_status = Some(format!("snapshot saved for {chapter}"));
     }
 
     pub fn run_pipeline(&mut self, pipeline: Pipeline) {
@@ -319,7 +698,13 @@ impl CkWriterApp {
             llm::ChatMessage::system(system),
             llm::ChatMessage::user(user),
         ];
-        let handle = llm::chat_stream(&self.settings.ollama_url, &self.settings.model, messages, true);
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            true,
+            llm::ChatTuning::default(),
+        );
         self.stream = Some(handle);
         self.stream_pipeline = Some(pipeline);
         self.last_error = None;
@@ -584,6 +969,42 @@ impl CkWriterApp {
     }
 }
 
+fn apply_mirror_op(book: &mut Book, self_id: &str, op: MirrorOp) -> anyhow::Result<()> {
+    match op {
+        MirrorOp::Add { target, kind } => {
+            let Some(mut t) = book.entity(&target).cloned() else {
+                log::debug!("mirror Add skipped: target {target:?} not found");
+                return Ok(());
+            };
+            // Idempotent: don't double-add the same (kind, self_id).
+            let exists = t.relations.iter().any(|r| {
+                r.kind.eq_ignore_ascii_case(&kind) && r.id.eq_ignore_ascii_case(self_id)
+            });
+            if exists {
+                return Ok(());
+            }
+            t.relations.push(Relation {
+                kind,
+                id: self_id.to_string(),
+            });
+            book.save_entity(t)?;
+        }
+        MirrorOp::Remove { target, kind } => {
+            let Some(mut t) = book.entity(&target).cloned() else {
+                return Ok(());
+            };
+            let before = t.relations.len();
+            t.relations.retain(|r| {
+                !(r.kind.eq_ignore_ascii_case(&kind) && r.id.eq_ignore_ascii_case(self_id))
+            });
+            if t.relations.len() != before {
+                book.save_entity(t)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn kind_singular_id(k: EntityKind) -> &'static str {
     match k {
         EntityKind::Character => "character",
@@ -598,6 +1019,8 @@ impl App for CkWriterApp {
         self.check_ollama(ctx);
         self.handle_shortcuts(ctx);
         self.poll_stream();
+        self.poll_char_extract_stream();
+        self.poll_progression_stream();
         self.poll_pdf_build();
         if let Some(r) = self.pdf_renderer.as_mut() {
             if r.poll() {
@@ -612,7 +1035,10 @@ impl App for CkWriterApp {
         }
 
         // Repaint while a stream is running so tokens show up promptly.
-        if self.stream.is_some() {
+        if self.stream.is_some()
+            || self.char_stream.is_some()
+            || self.progression_stream.is_some()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
 
@@ -630,13 +1056,42 @@ impl App for CkWriterApp {
             self.settings_dirty = true;
         }
 
+        // Defensive clamp: an earlier bug let the panel widen onto the editor
+        // area; re-opening the app would honour that bad width otherwise.
+        let saved_rw = self.settings.right_panel_width.clamp(280.0, 1200.0);
+        // Cast / Personae render their own master/detail inline, so the bottom
+        // inspector would just duplicate the same form.
+        let inline_detail_active = self.scope_tab == ui::scope_panel::Tab::Characters
+            && matches!(
+                self.char_sub_tab,
+                ui::scope_panel::CharSubTab::Cast | ui::scope_panel::CharSubTab::Personae
+            );
+        let bottom_inspector =
+            self.selected_entity.is_some() && !inline_detail_active;
         let right_resp = egui::SidePanel::right("scope")
-            .default_width(self.settings.right_panel_width)
+            .default_width(saved_rw)
             .resizable(true)
             .show(ctx, |ui| {
-                ui::scope_panel::show(self, ui);
-                ui.separator();
-                ui::inspector::show(self, ui);
+                if bottom_inspector {
+                    let total_h = ui.available_height();
+                    let scope_h = (total_h * 0.50).clamp(180.0, (total_h - 200.0).max(180.0));
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), scope_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui::scope_panel::show(self, ui);
+                        },
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("inspector-scroll")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            ui::inspector::show(self, ui);
+                        });
+                } else {
+                    ui::scope_panel::show(self, ui);
+                }
             });
         let rw = right_resp.response.rect.width();
         if (rw - self.settings.right_panel_width).abs() > 1.0 {

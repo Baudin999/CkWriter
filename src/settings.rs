@@ -52,7 +52,7 @@ fn default_left_panel_width() -> f32 {
     260.0
 }
 fn default_right_panel_width() -> f32 {
-    320.0
+    600.0
 }
 
 impl Default for Settings {

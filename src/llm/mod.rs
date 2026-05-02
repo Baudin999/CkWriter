@@ -1,3 +1,6 @@
+pub mod characters;
+mod parse;
+pub mod progression;
 pub mod prompts;
 pub mod revision;
 
@@ -105,18 +108,39 @@ impl StreamHandle {
     }
 }
 
+/// Per-call tuning for `chat_stream`. Defaults match the existing voice/show/prose
+/// pipelines; raise `num_ctx` for jobs whose prompts can exceed ~6k tokens
+/// (e.g. character extraction on a long chapter).
+#[derive(Debug, Clone, Copy)]
+pub struct ChatTuning {
+    pub temperature: f32,
+    pub num_ctx: u32,
+    pub num_predict: u32,
+}
+
+impl Default for ChatTuning {
+    fn default() -> Self {
+        Self {
+            temperature: 0.4,
+            num_ctx: 8192,
+            num_predict: 2048,
+        }
+    }
+}
+
 pub fn chat_stream(
     ollama_url: &str,
     model: &str,
     messages: Vec<ChatMessage>,
     json_mode: bool,
+    tuning: ChatTuning,
 ) -> StreamHandle {
     let (tx, rx) = mpsc::channel::<StreamEvent>();
     let url = format!("{}/api/chat", ollama_url.trim_end_matches('/'));
     let model_owned = model.to_string();
 
     let join = thread::spawn(move || {
-        if let Err(e) = run_stream(&url, &model_owned, &messages, json_mode, &tx) {
+        if let Err(e) = run_stream(&url, &model_owned, &messages, json_mode, tuning, &tx) {
             let msg = format!("{e:#}");
             log::error!("ollama chat_stream failed: {msg}");
             let _ = tx.send(StreamEvent::Error(msg));
@@ -138,14 +162,27 @@ fn run_stream(
     model: &str,
     messages: &[ChatMessage],
     json_mode: bool,
+    tuning: ChatTuning,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<()> {
     let start = std::time::Instant::now();
     let prompt_bytes: usize = messages.iter().map(|m| m.content.len()).sum();
     log::info!(
-        "ollama request -> {url} model={model} messages={} prompt_bytes={prompt_bytes} json_mode={json_mode}",
-        messages.len()
+        "ollama request -> {url} model={model} messages={} prompt_bytes={prompt_bytes} json_mode={json_mode} num_ctx={} num_predict={}",
+        messages.len(),
+        tuning.num_ctx,
+        tuning.num_predict,
     );
+    // Rough char→token ratio of ~3.5 for english. Warn before the server
+    // silently truncates the prompt; truncation drops the system message and
+    // produces nonsense output (e.g. a critique instead of JSON).
+    let est_tokens = (prompt_bytes as f32 / 3.5) as u32;
+    if est_tokens > tuning.num_ctx {
+        log::warn!(
+            "ollama prompt likely exceeds context: est_tokens≈{est_tokens} num_ctx={} -- response will be truncated",
+            tuning.num_ctx
+        );
+    }
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
@@ -158,9 +195,9 @@ fn run_stream(
         think: false,
         format: if json_mode { Some("json") } else { None },
         options: OllamaOptions {
-            temperature: Some(0.4),
-            num_ctx: Some(8192),
-            num_predict: Some(2048),
+            temperature: Some(tuning.temperature),
+            num_ctx: Some(tuning.num_ctx),
+            num_predict: Some(tuning.num_predict),
         },
     };
 
@@ -234,7 +271,7 @@ fn run_stream(
                         } else {
                             log::warn!(
                                 "ollama returned empty response: model may have failed to produce JSON, or num_ctx={} was too small for prompt_bytes={prompt_bytes}",
-                                8192
+                                tuning.num_ctx
                             );
                         }
                     }
