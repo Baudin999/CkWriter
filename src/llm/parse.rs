@@ -28,55 +28,55 @@ pub fn parse_json_object<T: for<'de> Deserialize<'de>>(buf: &str, label: &str) -
 /// Recover the elements of a `"<key>": [ ... ]` array when the surrounding
 /// document is malformed. Local models occasionally hallucinate stray
 /// non-JSON tokens between array elements (e.g. a bare `im,` between two
-/// objects); strict parsing then drops the whole batch. We walk the array
-/// element-by-element, parse each balanced `{...}` block independently, and
-/// silently skip the ones that don't deserialize. Use only as a fallback
-/// after `parse_json_object` returns `None` — partial output is better than
-/// none, but unconditional salvage would mask real schema regressions.
+/// objects, or a half-emitted object that lost its opening `{` and one of
+/// its keys); strict parsing then drops the whole batch. We walk the array
+/// looking for top-level `{` markers, parse each balanced `{...}` block
+/// independently, and silently skip the ones that don't deserialize. Use
+/// only as a fallback after `parse_json_object` returns `None` — partial
+/// output is better than none, but unconditional salvage would mask real
+/// schema regressions.
+///
+/// Crucially, we do *not* track JSON string state between elements. A
+/// corrupted fragment with mismatched quotes (e.g. `verb.",` with no
+/// opening `"`) would otherwise leave an `in_str` tracker stuck at `true`
+/// for the rest of the buffer, hiding every subsequent `{` and `]` from us
+/// — which is the whole point of this fallback. Each `{...}` block has its
+/// own string-tracking inside `find_balanced_close`, starting clean from
+/// the brace, so per-element parsing remains correct.
+///
+/// We also sanitize per element rather than globally for the same reason:
+/// global sanitization with a stuck `in_str` would escape ordinary
+/// whitespace newlines into literal `\n` between fields of well-formed
+/// downstream blocks, breaking them at parse time.
 pub fn salvage_array<T>(buf: &str, key: &str) -> Vec<T>
 where
     T: for<'de> serde::de::DeserializeOwned,
 {
     let extracted = extract_json_object(buf);
-    let sanitized = sanitize_json_strings(extracted);
-    let bytes = sanitized.as_bytes();
+    let bytes = extracted.as_bytes();
 
-    let Some(start) = find_array_start(&sanitized, key) else {
+    let Some(start) = find_array_start(extracted, key) else {
         return Vec::new();
     };
 
     let mut out: Vec<T> = Vec::new();
     let mut i = start;
-    let mut in_str = false;
-    let mut escape = false;
     while i < bytes.len() {
-        let b = bytes[i];
-        if escape {
-            escape = false;
-            i += 1;
-            continue;
-        }
-        if in_str {
-            match b {
-                b'\\' => escape = true,
-                b'"' => in_str = false,
-                _ => {}
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'"' => {
-                in_str = true;
-                i += 1;
-            }
-            b']' => break,
+        match bytes[i] {
+            b']' => return out,
             b'{' => {
                 let Some(end) = find_balanced_close(bytes, i) else {
-                    break;
+                    // This `{` is unbalanced — likely a stray brace inside
+                    // garbage text, or a truncated trailing element. Step
+                    // past just this byte so we keep looking for the next
+                    // candidate; giving up here would drop later valid
+                    // elements that come after a truncated middle one.
+                    i += 1;
+                    continue;
                 };
-                let elem = &sanitized[i..=end];
-                if let Ok(v) = serde_json::from_str::<T>(elem) {
+                let elem = &extracted[i..=end];
+                let sanitized = sanitize_json_strings(elem);
+                if let Ok(v) = serde_json::from_str::<T>(&sanitized) {
                     out.push(v);
                 }
                 i = end + 1;
@@ -350,6 +350,90 @@ mod tests {
         assert_eq!(flags[0].quote, "judgement");
         assert_eq!(flags[1].quote, "Wua, were perfect");
         assert_eq!(flags[2].quote, "ammassed");
+    }
+
+    #[test]
+    fn salvage_recovers_elements_after_unmatched_quote_fragment() {
+        // Reproduces the user-reported failure: between two valid elements
+        // the LLM emits a half-broken fragment whose quote-parity is odd
+        // (the "verb."," part has no opening quote). Old salvage tracked
+        // string state across the whole array, so in_str got stuck true
+        // and every subsequent `{` and `]` was treated as string content,
+        // dropping all later elements. With per-element parsing we should
+        // still recover the bookend objects.
+        let bad = r#"{
+  "flags": [
+    {
+      "quote": "took the dough out of the pots",
+      "why": "Clunky phrasing.",
+      "suggestion": "removed the dough"
+    },
+    undercutting the impact of the sentence with a weak verb.",
+      "quote": "His skill had ammassed him a small fortune",
+      "why": "Spelling error ('ammassed').",
+      "suggestion": "His skill had earned him a small fortune"
+    },
+    {
+      "quote": "third real element",
+      "why": "ok",
+      "suggestion": "fix"
+    }
+  ]
+}"#;
+        #[derive(Debug, serde::Deserialize)]
+        struct Flag {
+            quote: String,
+            #[allow(dead_code)]
+            why: String,
+            #[allow(dead_code)]
+            suggestion: String,
+        }
+        let flags: Vec<Flag> = salvage_array(bad, "flags");
+        assert_eq!(flags.len(), 2, "should recover both bookend elements");
+        assert_eq!(flags[0].quote, "took the dough out of the pots");
+        assert_eq!(flags[1].quote, "third real element");
+    }
+
+    #[test]
+    fn salvage_recovers_when_stray_fragment_has_no_opening_brace() {
+        // Second user-reported variant: the bad fragment never has an
+        // opening `{` at all — the LLM jumped straight into a key name
+        // (`undue_weight":`) with no enclosing object. The total `"` count
+        // across this fragment is odd, so any approach that tracks string
+        // state across elements would still get stuck.
+        let bad = r#"{
+  "flags": [
+    {
+      "quote": "He knew that people looked at him with judgement, sometimes pity.",
+      "why": "The noun 'judgement' is used where the adverb 'judgingly' would improve rhythm.",
+      "suggestion": "He knew people looked at him with judgment or pity."
+    },
+    undue_weight": "His skill had ammassed him a small fortune, which had given him the funds to buy a bakery and subsequently a stall in one of the busiest streets in Wua.",
+      "why": "Wordy and repetitive use of 'had' and 'given him the funds'.",
+      "suggestion": "His skill amassed a small fortune, allowing him to buy a bakery and a stall in Wua's busiest street."
+    },
+    {
+      "quote": "final element survives",
+      "why": "ok",
+      "suggestion": "fix"
+    }
+  ]
+}"#;
+        #[derive(Debug, serde::Deserialize)]
+        struct Flag {
+            quote: String,
+            #[allow(dead_code)]
+            why: String,
+            #[allow(dead_code)]
+            suggestion: String,
+        }
+        let flags: Vec<Flag> = salvage_array(bad, "flags");
+        assert_eq!(flags.len(), 2);
+        assert_eq!(
+            flags[0].quote,
+            "He knew that people looked at him with judgement, sometimes pity."
+        );
+        assert_eq!(flags[1].quote, "final element survives");
     }
 
     #[test]

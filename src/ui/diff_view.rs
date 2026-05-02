@@ -106,7 +106,7 @@ fn column_left(ui: &mut egui::Ui, baseline: &str, d: &Diff, height: f32, scroll_
                 .auto_shrink([false; 2])
                 .vertical_scroll_offset(scroll_y)
                 .show(ui, |ui| {
-                    let job = build_job(baseline, &d.left, /* is_left */ true);
+                    let job = build_job(baseline, &d.left);
                     ui.add(egui::Label::new(job).selectable(true));
                 });
             out_y = scroll.state.offset.y;
@@ -127,7 +127,7 @@ fn column_right(
         // the spans (race between edit and recompute), fall back to a plain
         // single-format job so we never colour past the buffer's bounds.
         let mut job = if spans_cover(text.len(), &right_spans) {
-            build_job(text, &right_spans, /* is_left */ false)
+            build_job(text, &right_spans)
         } else {
             plain_job(text)
         };
@@ -175,7 +175,7 @@ fn spans_cover(len: usize, spans: &[Span]) -> bool {
     cursor == len
 }
 
-fn build_job(text: &str, spans: &[Span], is_left: bool) -> LayoutJob {
+fn build_job(text: &str, spans: &[Span]) -> LayoutJob {
     let mut job = LayoutJob::default();
     let base = TextFormat {
         font_id: FontId::new(FONT_SIZE, FontFamily::Monospace),
@@ -193,7 +193,7 @@ fn build_job(text: &str, spans: &[Span], is_left: bool) -> LayoutJob {
             job.append(&text[cursor..s.range.0], 0.0, base.clone());
         }
         let mut fmt = base.clone();
-        let (fg, bg) = colours_for(s.kind, is_left);
+        let (fg, bg) = colours_for(s.kind);
         fmt.color = fg;
         if let Some(bg) = bg {
             fmt.background = bg;
@@ -226,18 +226,12 @@ fn plain_job(text: &str) -> LayoutJob {
 /// makes "removed" and "inserted" runs read as gutter-marked rows, which is
 /// what makes side-by-side diffs scannable; "changed" is foreground-only so
 /// the orange word inside an otherwise-white line still pops.
-fn colours_for(kind: SpanKind, is_left: bool) -> (Color32, Option<Color32>) {
+fn colours_for(kind: SpanKind) -> (Color32, Option<Color32>) {
     match kind {
         SpanKind::Equal => (theme::TEXT_PRIMARY, None),
         SpanKind::Removed => (theme::DIFF_REMOVED, Some(tint(theme::DIFF_REMOVED, 0x22))),
         SpanKind::Inserted => (theme::DIFF_INSERTED, Some(tint(theme::DIFF_INSERTED, 0x22))),
-        SpanKind::Changed => {
-            if is_left {
-                (theme::DIFF_CHANGED, Some(tint(theme::DIFF_CHANGED, 0x1c)))
-            } else {
-                (theme::DIFF_CHANGED, Some(tint(theme::DIFF_CHANGED, 0x1c)))
-            }
-        }
+        SpanKind::Changed => (theme::DIFF_CHANGED, Some(tint(theme::DIFF_CHANGED, 0x1c))),
     }
 }
 
