@@ -38,8 +38,17 @@ fn read_dir_filtered(dir: &Path) -> Vec<FileNode> {
         if !is_visible(&name, is_dir) {
             continue;
         }
-        let children = if is_dir { read_dir_filtered(&path) } else { Vec::new() };
-        out.push(FileNode { name, path, is_dir, children });
+        let children = if is_dir {
+            read_dir_filtered(&path)
+        } else {
+            Vec::new()
+        };
+        out.push(FileNode {
+            name,
+            path,
+            is_dir,
+            children,
+        });
     }
 
     out.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -62,5 +71,8 @@ fn is_visible(name: &str, is_dir: bool) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase());
-    matches!(ext.as_deref(), Some("tex" | "md" | "txt" | "json" | "toml" | "yml" | "yaml" | "bib"))
+    matches!(
+        ext.as_deref(),
+        Some("tex" | "md" | "txt" | "json" | "toml" | "yml" | "yaml" | "bib")
+    )
 }

@@ -57,7 +57,11 @@ pub fn render_detail(app: &mut CkWriterApp, ui: &mut egui::Ui, existing: &Entity
                 category_row(ui, app, &mut e.category);
             });
 
-        ui.label(RichText::new("voice notes").small().color(theme::TEXT_MUTED));
+        ui.label(
+            RichText::new("voice notes")
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
         ui.add(
             egui::TextEdit::multiline(&mut e.voice_notes)
                 .desired_rows(2)
@@ -104,10 +108,16 @@ pub fn render_detail(app: &mut CkWriterApp, ui: &mut egui::Ui, existing: &Entity
         ui.add_space(6.0);
         let can_save = dirty;
         ui.horizontal(|ui| {
-            if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save"))
+                .clicked()
+            {
                 app.commit_entity_edit();
             }
-            if ui.add_enabled(can_save, egui::Button::new("Revert")).clicked() {
+            if ui
+                .add_enabled(can_save, egui::Button::new("Revert"))
+                .clicked()
+            {
                 app.entity_dirty = None;
             }
             if ui.button("Close").clicked() {
@@ -153,10 +163,7 @@ fn progression_section(
             } else {
                 "Track for current chapter"
             };
-            if ui
-                .add_enabled(can_run, egui::Button::new(label))
-                .clicked()
-            {
+            if ui.add_enabled(can_run, egui::Button::new(label)).clicked() {
                 app.track_progression_for(entity_id);
             }
         });
@@ -191,17 +198,14 @@ fn progression_card(ui: &mut egui::Ui, e: &ProgressionEntry) {
                         .strong(),
                 );
                 if !e.tone.is_empty() {
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                RichText::new(&e.tone)
-                                    .small()
-                                    .italics()
-                                    .color(theme::TEXT_MUTED),
-                            );
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(&e.tone)
+                                .small()
+                                .italics()
+                                .color(theme::TEXT_MUTED),
+                        );
+                    });
                 }
             });
             if !e.situation.is_empty() {
@@ -247,10 +251,7 @@ fn category_row(ui: &mut egui::Ui, app: &CkWriterApp, category: &mut String) {
     egui::ComboBox::from_id_salt("inspector-category")
         .selected_text(label)
         .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(category.is_empty(), "(none)")
-                .clicked()
-            {
+            if ui.selectable_label(category.is_empty(), "(none)").clicked() {
                 category.clear();
             }
             for c in &shown {
@@ -268,7 +269,9 @@ fn relations_section(
     self_id: &str,
     relations: &mut Vec<Relation>,
 ) {
-    let Some(book) = app.book.as_ref() else { return };
+    let Some(book) = app.book.as_ref() else {
+        return;
+    };
     ui.separator();
     ui.label(
         RichText::new("relationships")
@@ -292,7 +295,11 @@ fn relations_section(
         ui.horizontal_wrapped(|ui| {
             relation_kind_combo(ui, idx, &kinds, &mut rel.kind);
             relation_target_combo(ui, idx, &targets, &mut rel.id);
-            if ui.small_button("\u{2715}").on_hover_text("remove").clicked() {
+            if ui
+                .small_button("\u{2715}")
+                .on_hover_text("remove")
+                .clicked()
+            {
                 to_remove = Some(idx);
             }
         });
@@ -304,9 +311,11 @@ fn relations_section(
                     .map(|(_, n)| n.as_str())
                     .unwrap_or(rel.id.as_str());
                 ui.label(
-                    RichText::new(format!("\u{21B3} mirrors as \u{201C}{inv}\u{201D} on {target_name}"))
-                        .small()
-                        .color(theme::TEXT_MUTED),
+                    RichText::new(format!(
+                        "\u{21B3} mirrors as \u{201C}{inv}\u{201D} on {target_name}"
+                    ))
+                    .small()
+                    .color(theme::TEXT_MUTED),
                 );
             }
         }
@@ -385,7 +394,9 @@ fn entity_label(e: &Entity) -> String {
 }
 
 fn show_appearances(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str) {
-    let Some(idx) = app.char_index.as_ref() else { return };
+    let Some(idx) = app.char_index.as_ref() else {
+        return;
+    };
     let occurrences = idx.for_entity(id);
     if occurrences.is_empty() {
         return;
@@ -414,11 +425,7 @@ fn show_appearances(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str) {
                 {
                     jump = Some((occ.chapter_path.clone(), occ.line));
                 }
-                ui.label(
-                    RichText::new(&occ.snippet)
-                        .small()
-                        .color(theme::TEXT_MUTED),
-                );
+                ui.label(RichText::new(&occ.snippet).small().color(theme::TEXT_MUTED));
                 ui.add_space(2.0);
             }
         });

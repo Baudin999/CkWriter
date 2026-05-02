@@ -11,10 +11,7 @@ pub fn voice_context_entities<'a>(book: &'a Book, hits: &[EntityHit]) -> Vec<&'a
         .filter(|h| h.kind == EntityKind::Character)
         .map(|h| h.entity_id.as_str())
         .collect();
-    let mut v: Vec<&Entity> = ids
-        .into_iter()
-        .filter_map(|id| book.entity(id))
-        .collect();
+    let mut v: Vec<&Entity> = ids.into_iter().filter_map(|id| book.entity(id)).collect();
     v.sort_by(|a, b| a.name.cmp(&b.name));
     v
 }

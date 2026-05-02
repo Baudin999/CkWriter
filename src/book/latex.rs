@@ -42,10 +42,8 @@ pub fn to_prose(tex: &str) -> String {
         out.push('\n');
     }
 
-    let inline_braced = Regex::new(
-        r"\\(?:emph|textit|textbf|texttt|underline)\{([^{}]*)\}",
-    )
-    .unwrap();
+    let inline_braced =
+        Regex::new(r"\\(?:emph|textit|textbf|texttt|underline)\{([^{}]*)\}").unwrap();
     let mut s = inline_braced.replace_all(&out, "$1").to_string();
 
     let drops = Regex::new(r"\\(?:switch|nl|maketitle)\b\{?\}?").unwrap();
@@ -128,6 +126,9 @@ mod tests {
 
     #[test]
     fn finds_chapter_title() {
-        assert_eq!(extract_chapter_title("\\chapter{Wua}\nbody"), Some("Wua".into()));
+        assert_eq!(
+            extract_chapter_title("\\chapter{Wua}\nbody"),
+            Some("Wua".into())
+        );
     }
 }

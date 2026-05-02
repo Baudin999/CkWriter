@@ -5,12 +5,7 @@ use crate::scope;
 /// Build the system prompt for the conversational-AI panel. Anchors the model
 /// to the current chapter prose and any in-scope cast so replies don't drift
 /// into generic feedback.
-pub fn build_system(
-    book: &Book,
-    in_scope: &[&Entity],
-    chapter_label: &str,
-    prose: &str,
-) -> String {
+pub fn build_system(book: &Book, in_scope: &[&Entity], chapter_label: &str, prose: &str) -> String {
     let mut s = String::new();
 
     if !book.voice_prompt.trim().is_empty() {

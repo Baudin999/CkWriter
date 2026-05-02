@@ -191,7 +191,11 @@ fn preview(s: &str, max: usize) -> String {
         s.replace('\n', "\\n")
     } else {
         let cap = floor_char_boundary(s, max);
-        format!("{}…[+{} bytes]", s[..cap].replace('\n', "\\n"), s.len() - cap)
+        format!(
+            "{}…[+{} bytes]",
+            s[..cap].replace('\n', "\\n"),
+            s.len() - cap
+        )
     }
 }
 

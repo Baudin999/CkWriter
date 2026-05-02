@@ -72,7 +72,11 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 RichText::new("●").color(Color32::from_rgb(0xf7, 0x76, 0x8e))
             };
             ui.label(dot);
-            ui.label(RichText::new(&app.settings.model).color(theme::TEXT_MUTED).small());
+            ui.label(
+                RichText::new(&app.settings.model)
+                    .color(theme::TEXT_MUTED)
+                    .small(),
+            );
             ui.label(RichText::new("ollama").color(theme::TEXT_MUTED).small());
         });
     });

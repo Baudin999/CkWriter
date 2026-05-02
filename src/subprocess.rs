@@ -115,12 +115,8 @@ impl Guarded {
 
         // Even if killed, join the drainers -- pipes are closed when the child
         // dies so the readers will return EOF promptly.
-        let stdout = stdout_h
-            .and_then(|h| h.join().ok())
-            .unwrap_or_default();
-        let stderr = stderr_h
-            .and_then(|h| h.join().ok())
-            .unwrap_or_default();
+        let stdout = stdout_h.and_then(|h| h.join().ok()).unwrap_or_default();
+        let stderr = stderr_h.and_then(|h| h.join().ok()).unwrap_or_default();
 
         match killed {
             WaitOutcome::Exited(status) => {
@@ -158,12 +154,7 @@ enum WaitOutcome {
     WaitErr(std::io::Error),
 }
 
-fn wait_with_timeout(
-    child: &mut Child,
-    timeout: Duration,
-    label: &str,
-    pid: u32,
-) -> WaitOutcome {
+fn wait_with_timeout(child: &mut Child, timeout: Duration, label: &str, pid: u32) -> WaitOutcome {
     let started = Instant::now();
     loop {
         match child.try_wait() {

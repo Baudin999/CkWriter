@@ -48,16 +48,19 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     // the next frame. The leading column gets sync within the same frame
     // because we forward its post-input offset to the trailing column.
     let shared = app.diff_scroll_y;
-    let (left_y, right_y) = ui
-        .columns(2, |cols| {
-            let ly = column_left(&mut cols[0], &baseline, &d, avail_h, shared);
-            // If the user scrolled the left column on this frame, hand its
-            // new offset to the right column so they paint in lockstep
-            // without a one-frame lag.
-            let leading = if (ly - shared).abs() > 0.5 { ly } else { shared };
-            let ry = column_right(&mut cols[1], app, &d, avail_h, leading);
-            (ly, ry)
-        });
+    let (left_y, right_y) = ui.columns(2, |cols| {
+        let ly = column_left(&mut cols[0], &baseline, &d, avail_h, shared);
+        // If the user scrolled the left column on this frame, hand its
+        // new offset to the right column so they paint in lockstep
+        // without a one-frame lag.
+        let leading = if (ly - shared).abs() > 0.5 {
+            ly
+        } else {
+            shared
+        };
+        let ry = column_right(&mut cols[1], app, &d, avail_h, leading);
+        (ly, ry)
+    });
     let next = if (right_y - shared).abs() > (left_y - shared).abs() {
         right_y
     } else {
@@ -92,13 +95,7 @@ fn muted(ui: &mut egui::Ui, msg: &str) {
     });
 }
 
-fn column_left(
-    ui: &mut egui::Ui,
-    baseline: &str,
-    d: &Diff,
-    height: f32,
-    scroll_y: f32,
-) -> f32 {
+fn column_left(ui: &mut egui::Ui, baseline: &str, d: &Diff, height: f32, scroll_y: f32) -> f32 {
     let mut out_y = scroll_y;
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::same(COLUMN_PAD as i8))
@@ -232,14 +229,8 @@ fn plain_job(text: &str) -> LayoutJob {
 fn colours_for(kind: SpanKind, is_left: bool) -> (Color32, Option<Color32>) {
     match kind {
         SpanKind::Equal => (theme::TEXT_PRIMARY, None),
-        SpanKind::Removed => (
-            theme::DIFF_REMOVED,
-            Some(tint(theme::DIFF_REMOVED, 0x22)),
-        ),
-        SpanKind::Inserted => (
-            theme::DIFF_INSERTED,
-            Some(tint(theme::DIFF_INSERTED, 0x22)),
-        ),
+        SpanKind::Removed => (theme::DIFF_REMOVED, Some(tint(theme::DIFF_REMOVED, 0x22))),
+        SpanKind::Inserted => (theme::DIFF_INSERTED, Some(tint(theme::DIFF_INSERTED, 0x22))),
         SpanKind::Changed => {
             if is_left {
                 (theme::DIFF_CHANGED, Some(tint(theme::DIFF_CHANGED, 0x1c)))

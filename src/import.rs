@@ -45,7 +45,8 @@ pub fn import_personae(root: &Path) -> Result<usize> {
                 e.aliases = aliases;
             }
         }
-        e.tags.push(current_section.to_lowercase().replace(' ', "-"));
+        e.tags
+            .push(current_section.to_lowercase().replace(' ', "-"));
         existing.save(root, e)?;
         written += 1;
     }

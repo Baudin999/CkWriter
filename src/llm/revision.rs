@@ -86,7 +86,11 @@ pub fn parse_voice(buf: &str) -> Option<RawVoice> {
             "voice: strict parse failed; salvaged {} flag(s) from malformed array",
             flags.len()
         );
-        Some(RawVoice { score: None, flags, preserved: Vec::new() })
+        Some(RawVoice {
+            score: None,
+            flags,
+            preserved: Vec::new(),
+        })
     }
 }
 

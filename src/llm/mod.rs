@@ -19,13 +19,22 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(s: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: s.into() }
+        Self {
+            role: "system".into(),
+            content: s.into(),
+        }
     }
     pub fn user(s: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: s.into() }
+        Self {
+            role: "user".into(),
+            content: s.into(),
+        }
     }
     pub fn assistant(s: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: s.into() }
+        Self {
+            role: "assistant".into(),
+            content: s.into(),
+        }
     }
 }
 
@@ -200,20 +209,14 @@ fn run_stream(
     let resp = match client.post(url).json(&body).send() {
         Ok(r) => r,
         Err(e) => {
-            log::error!(
-                "ollama send failed after {:?}: {e}",
-                start.elapsed()
-            );
+            log::error!("ollama send failed after {:?}: {e}", start.elapsed());
             return Err(e.into());
         }
     };
     let status = resp.status();
     if !status.is_success() {
         let txt = resp.text().unwrap_or_default();
-        log::error!(
-            "ollama HTTP {status} after {:?}: {txt}",
-            start.elapsed()
-        );
+        log::error!("ollama HTTP {status} after {:?}: {txt}", start.elapsed());
         anyhow::bail!("ollama HTTP {status}: {txt}");
     }
     log::debug!("ollama HTTP {status}, streaming...");
@@ -239,7 +242,10 @@ fn run_stream(
         match serde_json::from_str::<OllamaChatChunk>(&line) {
             Ok(chunk) => {
                 if let Some(err) = chunk.error {
-                    log::error!("ollama returned error chunk after {:?}: {err}", start.elapsed());
+                    log::error!(
+                        "ollama returned error chunk after {:?}: {err}",
+                        start.elapsed()
+                    );
                     let _ = tx.send(StreamEvent::Error(err));
                 }
                 if let Some(m) = chunk.message {

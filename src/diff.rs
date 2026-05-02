@@ -88,9 +88,7 @@ pub fn diff(old: &str, new: &str) -> Diff {
             }
             _ => {
                 let start = i;
-                while i < line_ops.len()
-                    && !matches!(line_ops[i], RawOp::Equal { .. })
-                {
+                while i < line_ops.len() && !matches!(line_ops[i], RawOp::Equal { .. }) {
                     i += 1;
                 }
                 refine_block(
@@ -179,23 +177,15 @@ fn refine_block(
     while k < word_ops.len() {
         match word_ops[k] {
             RawOp::Equal { o, n } => {
-                let lr = (
-                    old_block.0 + old_toks[o].0,
-                    old_block.0 + old_toks[o].1,
-                );
-                let rr = (
-                    new_block.0 + new_toks[n].0,
-                    new_block.0 + new_toks[n].1,
-                );
+                let lr = (old_block.0 + old_toks[o].0, old_block.0 + old_toks[o].1);
+                let rr = (new_block.0 + new_toks[n].0, new_block.0 + new_toks[n].1);
                 push_span(left, lr, SpanKind::Equal);
                 push_span(right, rr, SpanKind::Equal);
                 k += 1;
             }
             _ => {
                 let start = k;
-                while k < word_ops.len()
-                    && !matches!(word_ops[k], RawOp::Equal { .. })
-                {
+                while k < word_ops.len() && !matches!(word_ops[k], RawOp::Equal { .. }) {
                     k += 1;
                 }
                 let sub = &word_ops[start..k];
@@ -294,10 +284,7 @@ where
     let mut j = n;
     while i > 0 && j > 0 {
         if eq(&a[i - 1], &b[j - 1]) {
-            ops.push(RawOp::Equal {
-                o: i - 1,
-                n: j - 1,
-            });
+            ops.push(RawOp::Equal { o: i - 1, n: j - 1 });
             i -= 1;
             j -= 1;
         } else if tbl[(i - 1) * stride + j] >= tbl[i * stride + (j - 1)] {
@@ -451,10 +438,7 @@ mod tests {
     #[test]
     fn pure_insert_only_appears_on_the_right() {
         let d = diff("a\n", "a\nb\n");
-        assert!(d
-            .left
-            .iter()
-            .all(|s| matches!(s.kind, SpanKind::Equal)));
+        assert!(d.left.iter().all(|s| matches!(s.kind, SpanKind::Equal)));
         let inserts: Vec<&Span> = d
             .right
             .iter()
@@ -474,10 +458,7 @@ mod tests {
             .collect();
         assert_eq!(removes.len(), 1);
         assert_eq!(slice("a\nb\n", removes[0]), "b\n");
-        assert!(d
-            .right
-            .iter()
-            .all(|s| matches!(s.kind, SpanKind::Equal)));
+        assert!(d.right.iter().all(|s| matches!(s.kind, SpanKind::Equal)));
     }
 
     #[test]

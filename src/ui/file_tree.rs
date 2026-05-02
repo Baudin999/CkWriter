@@ -47,7 +47,9 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         }
         if let Some(book) = &app.book {
             let entries: Vec<PathBuf> = app.expanded_dirs.iter().cloned().collect();
-            app.settings.expanded_dirs.insert(book.root.clone(), entries);
+            app.settings
+                .expanded_dirs
+                .insert(book.root.clone(), entries);
             app.settings_dirty = true;
         }
     }
@@ -82,15 +84,13 @@ fn draw_node(
             }
         } else {
             let chapter = chapters.iter().find(|c| c.file_path == node.path);
-            let label = chapter
-                .map(|c| c.display_title.clone())
-                .unwrap_or_else(|| {
-                    node.path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&node.name)
-                        .to_string()
-                });
+            let label = chapter.map(|c| c.display_title.clone()).unwrap_or_else(|| {
+                node.path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&node.name)
+                    .to_string()
+            });
 
             let mut text = RichText::new(format!("   {label}"));
             match chapter {
@@ -114,7 +114,16 @@ fn draw_node(
 
     if node.is_dir && is_open {
         for child in &node.children {
-            draw_node(child, depth + 1, ui, current, chapters, expanded, to_open, to_toggle);
+            draw_node(
+                child,
+                depth + 1,
+                ui,
+                current,
+                chapters,
+                expanded,
+                to_open,
+                to_toggle,
+            );
         }
     }
 }

@@ -13,9 +13,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             app.start_pdf_build();
         }
         if let Some(meta) = &app.pdf_meta {
-            ui.label(
-                RichText::new(format!("{} pages", meta.page_count)).color(theme::TEXT_MUTED),
-            );
+            ui.label(RichText::new(format!("{} pages", meta.page_count)).color(theme::TEXT_MUTED));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
@@ -122,9 +120,7 @@ fn draw_page(
 ) {
     match status {
         PageStatus::Ready { png, .. } => {
-            if let std::collections::hash_map::Entry::Vacant(slot) =
-                app.pdf_textures.entry(page)
-            {
+            if let std::collections::hash_map::Entry::Vacant(slot) = app.pdf_textures.entry(page) {
                 if let Some(t) = load_texture(ui.ctx(), page, png) {
                     slot.insert(t);
                 }

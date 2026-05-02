@@ -287,8 +287,7 @@ impl PageRenderer {
         while let Ok((page, status)) = self.result_rx.try_recv() {
             let idx = (page - 1) as usize;
             if let Some(slot) = self.statuses.get_mut(idx) {
-                let was_terminal =
-                    matches!(slot, PageStatus::Ready { .. } | PageStatus::Failed(_));
+                let was_terminal = matches!(slot, PageStatus::Ready { .. } | PageStatus::Failed(_));
                 let is_terminal =
                     matches!(status, PageStatus::Ready { .. } | PageStatus::Failed(_));
                 if is_terminal && !was_terminal {
@@ -359,13 +358,7 @@ fn render_single_page(book_root: &Path, page: u32, dpi: u32) -> PageStatus {
     // Cache hit: a previous session already rendered this page at this DPI.
     if target.exists() {
         match png_dim(&target) {
-            Ok((w, h)) => {
-                return PageStatus::Ready {
-                    png: target,
-                    w,
-                    h,
-                }
-            }
+            Ok((w, h)) => return PageStatus::Ready { png: target, w, h },
             // Corrupt cache file: drop it and re-render below.
             Err(_) => {
                 let _ = std::fs::remove_file(&target);
@@ -399,11 +392,7 @@ fn render_single_page(book_root: &Path, page: u32, dpi: u32) -> PageStatus {
                 ));
             }
             match png_dim(&target) {
-                Ok((w, h)) => PageStatus::Ready {
-                    png: target,
-                    w,
-                    h,
-                },
+                Ok((w, h)) => PageStatus::Ready { png: target, w, h },
                 Err(e) => PageStatus::Failed(format!("png dims: {e}")),
             }
         }

@@ -240,9 +240,15 @@ mod tests {
         };
         let proposals = diff_against_entities(raw, &db);
         assert_eq!(proposals.len(), 3);
-        assert!(matches!(proposals[0].verdict, ProposalVerdict::Duplicate { .. }));
+        assert!(matches!(
+            proposals[0].verdict,
+            ProposalVerdict::Duplicate { .. }
+        ));
         assert!(matches!(proposals[1].verdict, ProposalVerdict::New));
-        assert!(matches!(proposals[2].verdict, ProposalVerdict::Duplicate { .. }));
+        assert!(matches!(
+            proposals[2].verdict,
+            ProposalVerdict::Duplicate { .. }
+        ));
     }
 
     #[test]

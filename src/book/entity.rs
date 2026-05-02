@@ -128,7 +128,9 @@ impl Entity {
     }
 
     pub fn file_path(&self, root: &Path) -> PathBuf {
-        root.join("Info").join(self.kind.folder()).join(format!("{}.json", self.id))
+        root.join("Info")
+            .join(self.kind.folder())
+            .join(format!("{}.json", self.id))
     }
 }
 

@@ -75,10 +75,7 @@ impl Book {
         let config = load_config(root);
         let main_tex = root.join(&config.main_tex);
         if !main_tex.exists() {
-            return Err(anyhow!(
-                "main TeX file not found: {}",
-                main_tex.display()
-            ));
+            return Err(anyhow!("main TeX file not found: {}", main_tex.display()));
         }
 
         let main_text = std::fs::read_to_string(&main_tex)?;

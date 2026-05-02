@@ -33,20 +33,20 @@ pub fn init() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let writer: Box<dyn Write + Send + 'static> = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(file) => Box::new(TeeWriter { stderr: io::stderr(), file }),
-        Err(e) => {
-            eprintln!(
-                "ckwriter: failed to open log file {}: {e} -- falling back to stderr only",
-                path.display()
-            );
-            Box::new(io::stderr())
-        }
-    };
+    let writer: Box<dyn Write + Send + 'static> =
+        match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => Box::new(TeeWriter {
+                stderr: io::stderr(),
+                file,
+            }),
+            Err(e) => {
+                eprintln!(
+                    "ckwriter: failed to open log file {}: {e} -- falling back to stderr only",
+                    path.display()
+                );
+                Box::new(io::stderr())
+            }
+        };
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Pipe(writer))

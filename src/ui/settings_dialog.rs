@@ -39,9 +39,7 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                     .width(400.0)
                     .show_ui(ui, |ui| {
                         for name in &app.available_models {
-                            if ui
-                                .selectable_label(name == &current, name)
-                                .clicked()
+                            if ui.selectable_label(name == &current, name).clicked()
                                 && app.settings.model != *name
                             {
                                 app.settings.model = name.clone();
@@ -50,11 +48,7 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                         }
                     });
             }
-            if let Some(book_model) = app
-                .book
-                .as_ref()
-                .and_then(|b| b.config.model.clone())
-            {
+            if let Some(book_model) = app.book.as_ref().and_then(|b| b.config.model.clone()) {
                 ui.label(
                     RichText::new(format!(
                         "current book overrides model on open: {book_model}"
@@ -66,16 +60,18 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
 
             ui.add_space(8.0);
             ui.label(RichText::new("ollama url").small().color(theme::TEXT_MUTED));
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut app.settings.ollama_url)
-                    .desired_width(400.0),
-            );
+            let resp = ui
+                .add(egui::TextEdit::singleline(&mut app.settings.ollama_url).desired_width(400.0));
             if resp.changed() {
                 changed = true;
             }
 
             ui.add_space(8.0);
-            ui.label(RichText::new("editor font size").small().color(theme::TEXT_MUTED));
+            ui.label(
+                RichText::new("editor font size")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
             let resp = ui.add(
                 egui::Slider::new(&mut app.settings.editor_font_size, 10.0..=28.0)
                     .step_by(1.0)

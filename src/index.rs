@@ -31,10 +31,7 @@ impl CrossChapterIndex {
             let text = match std::fs::read_to_string(&ch.file_path) {
                 Ok(t) => t,
                 Err(e) => {
-                    log::warn!(
-                        "index: cannot read {}: {e}",
-                        ch.file_path.display()
-                    );
+                    log::warn!("index: cannot read {}: {e}", ch.file_path.display());
                     continue;
                 }
             };
@@ -74,7 +71,9 @@ impl CrossChapterIndex {
     }
 
     pub fn distinct_chapter_count(&self, id: &str) -> usize {
-        let Some(v) = self.by_entity.get(id) else { return 0 };
+        let Some(v) = self.by_entity.get(id) else {
+            return 0;
+        };
         let mut chapters: Vec<&PathBuf> = v.iter().map(|o| &o.chapter_path).collect();
         chapters.sort();
         chapters.dedup();

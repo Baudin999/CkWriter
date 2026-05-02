@@ -99,8 +99,7 @@ pub fn hit_at(hits: &[EntityHit], byte: usize) -> Option<&EntityHit> {
 /// Lightweight candidate proper-noun finder (capitalized word not at sentence start).
 #[allow(dead_code)]
 pub fn candidates(text: &str, known_aliases: &[String]) -> Vec<(usize, usize, String)> {
-    let known: std::collections::HashSet<&str> =
-        known_aliases.iter().map(|s| s.as_str()).collect();
+    let known: std::collections::HashSet<&str> = known_aliases.iter().map(|s| s.as_str()).collect();
     let stop: std::collections::HashSet<&str> = STOPLIST.iter().copied().collect();
     let skips = latex::skip_ranges(text);
 
@@ -147,18 +146,12 @@ pub fn frequency_map(hits: &[EntityHit]) -> Vec<(String, EntityKind, usize)> {
     for h in hits {
         *counts.entry((h.entity_id.clone(), h.kind)).or_insert(0) += 1;
     }
-    let mut v: Vec<_> = counts
-        .into_iter()
-        .map(|((id, k), c)| (id, k, c))
-        .collect();
+    let mut v: Vec<_> = counts.into_iter().map(|((id, k), c)| (id, k, c)).collect();
     v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
     v
 }
 
-pub fn by_kind(
-    freqs: &[(String, EntityKind, usize)],
-    kind: EntityKind,
-) -> Vec<(&str, usize)> {
+pub fn by_kind(freqs: &[(String, EntityKind, usize)], kind: EntityKind) -> Vec<(&str, usize)> {
     freqs
         .iter()
         .filter(|(_, k, _)| *k == kind)

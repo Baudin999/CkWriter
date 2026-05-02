@@ -160,7 +160,10 @@ mod tests {
         let d = BookData::default();
         assert_eq!(d.inverse_relation("child of").as_deref(), Some("parent of"));
         assert_eq!(d.inverse_relation("parent of").as_deref(), Some("child of"));
-        assert_eq!(d.inverse_relation("sibling of").as_deref(), Some("sibling of"));
+        assert_eq!(
+            d.inverse_relation("sibling of").as_deref(),
+            Some("sibling of")
+        );
         assert_eq!(d.inverse_relation("works for").as_deref(), Some("leads"));
         assert_eq!(d.inverse_relation("leads").as_deref(), Some("works for"));
         assert_eq!(d.inverse_relation("Child Of").as_deref(), Some("parent of"));
