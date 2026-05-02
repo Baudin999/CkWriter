@@ -112,24 +112,16 @@ impl StreamHandle {
     }
 }
 
-/// Per-call tuning for `chat_stream`. Defaults match the existing voice/show/prose
-/// pipelines; raise `num_ctx` for jobs whose prompts can exceed ~6k tokens
-/// (e.g. character extraction on a long chapter).
+/// Per-call tuning for `chat_stream`. No `Default` impl: the previous 8k
+/// `num_ctx` default silently truncated full-chapter prompts, so the model
+/// never saw the system prompt and produced freeform prose instead of JSON.
+/// Every caller picks values explicitly so adding a new pipeline forces a
+/// deliberate choice rather than inheriting a foot-gun.
 #[derive(Debug, Clone, Copy)]
 pub struct ChatTuning {
     pub temperature: f32,
     pub num_ctx: u32,
     pub num_predict: u32,
-}
-
-impl Default for ChatTuning {
-    fn default() -> Self {
-        Self {
-            temperature: 0.4,
-            num_ctx: 8192,
-            num_predict: 2048,
-        }
-    }
 }
 
 pub fn chat_stream(

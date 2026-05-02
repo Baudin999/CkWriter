@@ -784,6 +784,9 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             if ui.button("prose").clicked() {
                 app.run_pipeline(Pipeline::Prose);
             }
+            if ui.button("spelling").clicked() {
+                app.run_pipeline(Pipeline::Spelling);
+            }
         });
     });
     if busy {
@@ -818,32 +821,100 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         });
     ui.separator();
 
-    let pending = app
-        .revisions
-        .iter()
-        .filter(|r| r.status == crate::llm::revision::RevisionStatus::Pending)
-        .count();
+    let pending = app.revisions.len();
     ui.label(format!("{pending} pending suggestions"));
     ui.separator();
 
+    let selected_id = app.selected_revision;
     let mut accept_id: Option<u32> = None;
     let mut dismiss_id: Option<u32> = None;
+    let mut select_id: Option<u32> = None;
     egui::ScrollArea::vertical()
         .id_salt("revisions-scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
+            // Bump the body/button font for the result-set so cards are
+            // easier to scan than the rest of the panel.
+            let style = ui.style_mut();
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Button, egui::FontId::proportional(14.5));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Small, egui::FontId::proportional(12.5));
+
             for rev in &app.revisions {
-                if rev.status != crate::llm::revision::RevisionStatus::Pending {
-                    continue;
+                let color = crate::ui::editor::revision_color(rev);
+                let selected = selected_id == Some(rev.id);
+                let card_resp = revision_card(ui, rev, color, selected);
+                if card_resp.body_clicked {
+                    select_id = Some(rev.id);
                 }
-                let color = match rev.pipeline {
-                    crate::llm::prompts::Pipeline::Voice => theme::REVISION_VOICE,
-                    crate::llm::prompts::Pipeline::ShowDontTell => theme::REVISION_SHOW,
-                    crate::llm::prompts::Pipeline::Prose => theme::REVISION_PROSE,
-                };
-                ui.group(|ui| {
+                if card_resp.apply_clicked {
+                    accept_id = Some(rev.id);
+                }
+                if card_resp.dismiss_clicked {
+                    dismiss_id = Some(rev.id);
+                }
+            }
+        });
+    if let Some(id) = select_id {
+        app.select_revision(id);
+    }
+    if let Some(id) = accept_id {
+        app.accept_revision(id);
+    }
+    if let Some(id) = dismiss_id {
+        app.dismiss_revision(id);
+    }
+}
+
+struct RevisionCardEvents {
+    body_clicked: bool,
+    apply_clicked: bool,
+    dismiss_clicked: bool,
+}
+
+fn revision_card(
+    ui: &mut egui::Ui,
+    rev: &crate::llm::revision::Revision,
+    color: Color32,
+    selected: bool,
+) -> RevisionCardEvents {
+    let bg = if selected {
+        theme::REVISION_SELECTED_BG
+    } else {
+        Color32::TRANSPARENT
+    };
+    let mut body_clicked = false;
+    let mut apply_clicked = false;
+    let mut dismiss_clicked = false;
+    egui::Frame::group(ui.style())
+        .fill(bg)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, |ui| {
+            // Cards span the full panel width so they don't shrink-wrap to
+            // their longest line and leave a ragged right edge.
+            ui.set_min_width(ui.available_width());
+
+            // Body region: only THIS area is click-sensitive for selecting
+            // the card. Putting the buttons inside the same click rect would
+            // let the body absorb their clicks (egui registers the parent's
+            // sense after the children, so the parent wins on overlap).
+            let body_resp = ui
+                .scope(|ui| {
+                    ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(rev.pipeline.label()).color(color).strong());
+                        let chip_label = if rev.kind == crate::llm::revision::FlagKind::Other {
+                            rev.pipeline.label().to_string()
+                        } else {
+                            rev.kind.label().to_string()
+                        };
+                        ui.label(RichText::new(chip_label).color(color).strong());
                         if rev.anchor.is_none() {
                             ui.label(
                                 RichText::new("(unanchored)")
@@ -853,32 +924,41 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         }
                     });
                     ui.label(
-                        RichText::new(format!("\"{}\"", short(&rev.quote, 80)))
+                        RichText::new(format!("\u{201C}{}\u{201D}", short(&rev.quote, 100)))
                             .italics()
                             .color(theme::TEXT_MUTED),
                     );
-                    ui.label(&rev.why);
+                    if !rev.why.is_empty() {
+                        ui.label(&rev.why);
+                    }
                     if !rev.suggestion.is_empty() {
                         ui.label(RichText::new(&rev.suggestion).color(Color32::WHITE));
                     }
-                    ui.horizontal(|ui| {
-                        if rev.suggestion.is_empty() || rev.anchor.is_none() {
-                            ui.add_enabled(false, egui::Button::new("Accept"));
-                        } else if ui.button("Accept").clicked() {
-                            accept_id = Some(rev.id);
-                        }
-                        if ui.button("Dismiss").clicked() {
-                            dismiss_id = Some(rev.id);
-                        }
-                    });
-                });
-            }
+                })
+                .response
+                .interact(egui::Sense::click());
+            body_clicked = body_resp.clicked();
+
+            // Action row lives OUTSIDE the body's click rect, so button
+            // clicks don't double as a "select card" click.
+            ui.horizontal(|ui| {
+                let has_anchor = rev.anchor.is_some();
+                let can_apply = !rev.suggestion.is_empty() && has_anchor;
+                if ui
+                    .add_enabled(can_apply, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    apply_clicked = true;
+                }
+                if ui.button("Dismiss").clicked() {
+                    dismiss_clicked = true;
+                }
+            });
         });
-    if let Some(id) = accept_id {
-        app.accept_revision(id);
-    }
-    if let Some(id) = dismiss_id {
-        app.dismiss_revision(id);
+    RevisionCardEvents {
+        body_clicked,
+        apply_clicked,
+        dismiss_clicked,
     }
 }
 

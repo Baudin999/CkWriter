@@ -2,7 +2,7 @@ use crate::app::CkWriterApp;
 use crate::book::entity::EntityKind;
 use crate::extract::{self, EntityHit};
 use crate::llm::prompts::Pipeline;
-use crate::llm::revision::{Revision, RevisionStatus};
+use crate::llm::revision::{FlagKind, Revision};
 use crate::theme;
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::widgets::text_edit::TextEditState;
@@ -47,6 +47,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     let family = editor_family();
     let entity_hits = app.entity_hits.clone();
     let revisions: Vec<Revision> = app.revisions.clone();
+    let selected_revision = app.selected_revision;
     let entity_hits_for_hover = entity_hits.clone();
     let revisions_for_hover = revisions.clone();
     let layout_family = family.clone();
@@ -59,6 +60,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             &layout_family,
             &entity_hits,
             &revisions,
+            selected_revision,
         );
         job.wrap.max_width = wrap_width;
         ui.fonts(|f| f.layout_job(job))
@@ -126,8 +128,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         let rev = revisions_for_hover
                             .iter()
                             .find(|r| {
-                                r.status == RevisionStatus::Pending
-                                    && r.anchor.map(|(s, e)| byte >= s && byte < e).unwrap_or(false)
+                                r.anchor.map(|(s, e)| byte >= s && byte < e).unwrap_or(false)
                             })
                             .cloned();
                         if let Some(rev) = rev {
@@ -228,6 +229,19 @@ fn pipeline_color(p: Pipeline) -> Color32 {
         Pipeline::Voice => theme::REVISION_VOICE,
         Pipeline::ShowDontTell => theme::REVISION_SHOW,
         Pipeline::Prose => theme::REVISION_PROSE,
+        Pipeline::Spelling => theme::REVISION_SPELLING,
+    }
+}
+
+/// The colour used for a revision's underline + card chip. Spelling-pipeline
+/// flags split into spelling/punctuation/grammar; everything else falls back
+/// to its pipeline's colour.
+pub fn revision_color(rev: &Revision) -> Color32 {
+    match rev.kind {
+        FlagKind::Spelling => theme::REVISION_SPELLING,
+        FlagKind::Punctuation => theme::REVISION_PUNCTUATION,
+        FlagKind::Grammar => theme::REVISION_GRAMMAR,
+        FlagKind::Other => pipeline_color(rev.pipeline),
     }
 }
 
@@ -238,6 +252,7 @@ fn build_job(
     family: &FontFamily,
     hits: &[EntityHit],
     revisions: &[Revision],
+    selected_revision: Option<u32>,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     let base = TextFormat {
@@ -260,10 +275,19 @@ fn build_job(
         f.underline = Stroke::new(1.0, color.linear_multiply(0.6));
         spans.push((h.start, h.end, f));
     }
-    for r in revisions.iter().filter(|r| r.status == RevisionStatus::Pending) {
+    for r in revisions {
         if let Some((s, e)) = r.anchor {
+            let color = revision_color(r);
+            let selected = selected_revision == Some(r.id);
             let mut f = base.clone();
-            f.underline = Stroke::new(2.0, pipeline_color(r.pipeline));
+            // Selected revision wins visually: thicker underline + tinted
+            // background so the writer can spot the active edit at a glance.
+            if selected {
+                f.underline = Stroke::new(3.0, color);
+                f.background = theme::REVISION_SELECTED_BG;
+            } else {
+                f.underline = Stroke::new(2.0, color);
+            }
             spans.push((s, e, f));
         }
     }

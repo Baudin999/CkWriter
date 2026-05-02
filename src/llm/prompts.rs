@@ -7,6 +7,7 @@ pub enum Pipeline {
     Voice,
     ShowDontTell,
     Prose,
+    Spelling,
 }
 
 impl Pipeline {
@@ -15,52 +16,61 @@ impl Pipeline {
             Pipeline::Voice => "voice",
             Pipeline::ShowDontTell => "show, don't tell",
             Pipeline::Prose => "prose",
+            Pipeline::Spelling => "spelling",
         }
     }
 }
 
 pub fn build_system(book: &Book, in_scope: &[&Entity], pipeline: Pipeline) -> String {
+    // Mechanics-only pipelines (prose, spelling) get a lean system prompt.
+    // The book voice prompt + roadmap + cast preamble used by voice/show was
+    // pulling these runs toward freeform critique and breaking JSON mode.
+    let needs_book_context = matches!(pipeline, Pipeline::Voice | Pipeline::ShowDontTell);
+
     let mut s = String::new();
 
-    if !book.voice_prompt.trim().is_empty() {
-        s.push_str(&book.voice_prompt);
-        s.push_str("\n\n---\n\n");
-    } else {
-        s.push_str(
-            "You are an editor for an adult urban-fantasy novel. \
-             Protect the author's voice. Flag, don't rewrite. \
-             Never invent worldbuilding or characters.\n\n",
-        );
-    }
+    if needs_book_context {
+        if !book.voice_prompt.trim().is_empty() {
+            s.push_str(&book.voice_prompt);
+            s.push_str("\n\n---\n\n");
+        } else {
+            s.push_str(
+                "You are an editor for an adult urban-fantasy novel. \
+                 Protect the author's voice. Flag, don't rewrite. \
+                 Never invent worldbuilding or characters.\n\n",
+            );
+        }
 
-    if !book.roadmap.trim().is_empty() {
-        s.push_str("## Roadmap (where the story is going)\n\n");
-        s.push_str(&scope::tail(&book.roadmap, 2000));
-        s.push_str("\n\n---\n\n");
-    }
+        if !book.roadmap.trim().is_empty() {
+            s.push_str("## Roadmap (where the story is going)\n\n");
+            s.push_str(&scope::tail(&book.roadmap, 2000));
+            s.push_str("\n\n---\n\n");
+        }
 
-    if !in_scope.is_empty() {
-        s.push_str("## Characters in this scene\n\n");
-        for e in in_scope {
-            s.push_str(&format!("- **{}**", e.name));
-            if !e.role.is_empty() {
-                s.push_str(&format!(" ({})", e.role));
+        if !in_scope.is_empty() {
+            s.push_str("## Characters in this scene\n\n");
+            for e in in_scope {
+                s.push_str(&format!("- **{}**", e.name));
+                if !e.role.is_empty() {
+                    s.push_str(&format!(" ({})", e.role));
+                }
+                s.push('\n');
+                if !e.tone.is_empty() {
+                    s.push_str(&format!("  - tone: {}\n", e.tone));
+                }
+                if !e.voice_notes.is_empty() {
+                    s.push_str(&format!("  - voice: {}\n", e.voice_notes));
+                }
             }
             s.push('\n');
-            if !e.tone.is_empty() {
-                s.push_str(&format!("  - tone: {}\n", e.tone));
-            }
-            if !e.voice_notes.is_empty() {
-                s.push_str(&format!("  - voice: {}\n", e.voice_notes));
-            }
         }
-        s.push('\n');
     }
 
     s.push_str(match pipeline {
         Pipeline::Voice => VOICE_INSTRUCTIONS,
         Pipeline::ShowDontTell => SHOW_INSTRUCTIONS,
         Pipeline::Prose => PROSE_INSTRUCTIONS,
+        Pipeline::Spelling => SPELLING_INSTRUCTIONS,
     });
 
     s
@@ -101,21 +111,44 @@ Rules:
 - Suggestions favor concrete sensory or behavioral detail (smell, sound, gesture, weight, temperature, taste, posture).
 - Skip anything that is already showing."#;
 
-const PROSE_INSTRUCTIONS: &str = r#"## Task
+const PROSE_INSTRUCTIONS: &str = r#"You are a prose-mechanics editor. Critique sentence rhythm, dead verbs, redundancy, adjective pile-ups, and filler hedges in the prose below.
 
-Critique **prose mechanics**: rhythm, sentence variety, dead verbs, redundancy, adjective pile-ups, filler hedges.
-Return STRICT JSON:
+Return STRICT JSON in this exact shape and NOTHING else — no preface, no commentary, no markdown fences, no code blocks. Your entire response must be a single JSON object.
 
 {
   "flags": [
-    { "quote": "<exact substring>", "why": "<one sentence>", "suggestion": "<one-sentence trim or rephrase>" }
+    { "quote": "<exact substring of the prose>", "why": "<one sentence>", "suggestion": "<one-sentence trim or rephrase>" }
   ]
 }
 
 Rules:
-- "quote" MUST be an exact substring of the prose.
-- Maximum 8 flags.
-- Prefer surgical cuts over rewrites."#;
+- "quote" MUST be an exact substring of the prose, copyable verbatim.
+- Maximum 8 flags. Prefer surgical cuts over rewrites.
+- If you have nothing to flag, return {"flags": []}."#;
+
+const SPELLING_INSTRUCTIONS: &str = r#"You are a copy editor. Find spelling, punctuation, and grammar mistakes in the prose below.
+
+Return STRICT JSON in this exact shape and NOTHING else — no preface, no commentary, no markdown fences, no code blocks. Your entire response must be a single JSON object.
+
+{
+  "flags": [
+    {
+      "kind": "spelling" | "punctuation" | "grammar",
+      "quote": "<exact substring containing the mistake>",
+      "why": "<one short sentence — what kind of mistake>",
+      "suggestion": "<the corrected substring, drop-in replacement for quote>"
+    }
+  ]
+}
+
+Rules:
+- "kind" MUST be exactly one of: "spelling", "punctuation", "grammar". Pick the dominant category for that mistake.
+- "quote" MUST be an exact substring of the prose, copyable verbatim.
+- "suggestion" MUST be a drop-in replacement for "quote" — replacing "quote" with "suggestion" must yield correct text.
+- Keep "quote" short — just the words around the error, not whole sentences.
+- Cover spelling, punctuation, and grammar only. Do NOT rewrite for style, voice, word choice, or rhythm.
+- Skip proper nouns, invented words, dialect, and intentional misspellings. When unsure, skip.
+- If there are no mistakes, return {"flags": []}."#;
 
 pub fn build_user(prose: &str) -> String {
     let mut s = String::new();
@@ -124,6 +157,6 @@ pub fn build_user(prose: &str) -> String {
     if !prose.ends_with('\n') {
         s.push('\n');
     }
-    s.push_str("```\n");
+    s.push_str("```\n\nReturn the JSON object now. JSON only.\n");
     s
 }

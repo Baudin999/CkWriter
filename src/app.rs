@@ -5,7 +5,7 @@ use crate::index::CrossChapterIndex;
 use crate::llm;
 use crate::llm::characters::{ProposalStatus, ProposedCharacter};
 use crate::llm::prompts::Pipeline;
-use crate::llm::revision::{Revision, RevisionStatus};
+use crate::llm::revision::Revision;
 use crate::pdf;
 use crate::scope;
 use crate::settings::Settings;
@@ -37,6 +37,9 @@ pub struct CkWriterApp {
     pub last_stream_buffer: Option<String>,
     pub revisions: Vec<Revision>,
     pub next_rev_id: u32,
+    /// Which revision card the writer last clicked. Drives the editor jump,
+    /// the highlighted-card style, and the stronger underline in-text.
+    pub selected_revision: Option<u32>,
 
     /// Separate stream so character extraction never collides with the
     /// voice/show/prose coaching pipelines.
@@ -123,6 +126,7 @@ impl CkWriterApp {
             last_stream_buffer: None,
             revisions: Vec::new(),
             next_rev_id: 1,
+            selected_revision: None,
             char_stream: None,
             last_char_buffer: None,
             char_proposals: Vec::new(),
@@ -208,6 +212,7 @@ impl CkWriterApp {
         self.editor_text.clear();
         self.entity_hits.clear();
         self.revisions.clear();
+        self.selected_revision = None;
         self.dirty = false;
         self.selected_entity = None;
         self.entity_dirty = None;
@@ -291,6 +296,7 @@ impl CkWriterApp {
                 }
                 self.refresh_entity_hits();
                 self.revisions.clear();
+                self.selected_revision = None;
                 self.last_error = None;
                 self.settings.last_chapter = Some(path.to_path_buf());
                 let _ = self.settings.save();
@@ -453,14 +459,14 @@ impl CkWriterApp {
             llm::ChatMessage::system(llm::characters::SYSTEM_PROMPT.to_string()),
             llm::ChatMessage::user(llm::characters::build_user(&prose)),
         ];
-        // Long chapters can run 90KB+ of prose. The default 8k context window
-        // truncates the system message before the model ever reads it, leading
-        // to a free-form review instead of JSON. 32k tokens fits any chapter
+        // Long chapters can run 90KB+ of prose. 32k tokens fits any chapter
         // we've seen and is well within gemma3's supported window.
+        // num_predict is generous because a single chapter can yield up to
+        // 30 character entries (name + aliases + role + voice + evidence).
         let tuning = llm::ChatTuning {
+            temperature: 0.4,
             num_ctx: 32_768,
             num_predict: 4_096,
-            ..Default::default()
         };
         let handle = llm::chat_stream(
             &self.settings.ollama_url,
@@ -745,10 +751,11 @@ impl CkWriterApp {
             llm::ChatMessage::system(crate::llm::progression::SYSTEM_PROMPT.to_string()),
             llm::ChatMessage::user(user_prompt),
         ];
+        // Output is a single small JSON snapshot per character; 1k is plenty.
         let tuning = llm::ChatTuning {
+            temperature: 0.4,
             num_ctx: 32_768,
             num_predict: 1_024,
-            ..Default::default()
         };
         log::info!(
             "progression run start: entity={entity_id:?} chapter={:?} prose_chars={}",
@@ -830,16 +837,38 @@ impl CkWriterApp {
         let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
         let user = crate::llm::prompts::build_user(&prose);
 
+        let chapter_label = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.display_title.as_str())
+            .unwrap_or("<no chapter>");
+        log::info!(
+            "pipeline={} start: chapter={chapter_label:?} prose_chars={} system_bytes={} user_bytes={} model={}",
+            pipeline.label(),
+            prose.chars().count(),
+            system.len(),
+            user.len(),
+            self.settings.model,
+        );
+
         let messages = vec![
             llm::ChatMessage::system(system),
             llm::ChatMessage::user(user),
         ];
+        // Full-chapter prose can run 40-90KB; 32k tokens fits the system
+        // prompt + chapter without truncation. Output cap covers up to ~8
+        // flags' worth of quote/why/suggestion strings.
+        let tuning = llm::ChatTuning {
+            temperature: 0.4,
+            num_ctx: 32_768,
+            num_predict: 2_048,
+        };
         let handle = llm::chat_stream(
             &self.settings.ollama_url,
             &self.settings.model,
             messages,
             true,
-            llm::ChatTuning::default(),
+            tuning,
         );
         self.stream = Some(handle);
         self.stream_pipeline = Some(pipeline);
@@ -864,18 +893,45 @@ impl CkWriterApp {
     }
 
     fn ingest_response(&mut self, pipeline: Pipeline, buffer: &str) {
-        use crate::llm::revision::{anchor, parse_flags_only, parse_voice};
+        use crate::llm::revision::{anchor, parse_flags_only, parse_voice, FlagKind};
         let prose = latex::to_prose(&self.editor_text);
+        let parsed_ok;
         let flags = match pipeline {
-            Pipeline::Voice => parse_voice(buffer)
-                .map(|v| v.flags)
-                .unwrap_or_default(),
-            Pipeline::ShowDontTell | Pipeline::Prose => parse_flags_only(buffer)
-                .map(|v| v.flags)
-                .unwrap_or_default(),
+            Pipeline::Voice => match parse_voice(buffer) {
+                Some(v) => {
+                    parsed_ok = true;
+                    v.flags
+                }
+                None => {
+                    parsed_ok = false;
+                    Vec::new()
+                }
+            },
+            Pipeline::ShowDontTell | Pipeline::Prose | Pipeline::Spelling => {
+                match parse_flags_only(buffer) {
+                    Some(v) => {
+                        parsed_ok = true;
+                        v.flags
+                    }
+                    None => {
+                        parsed_ok = false;
+                        Vec::new()
+                    }
+                }
+            }
         };
+        if !parsed_ok {
+            log::warn!(
+                "pipeline={} parse failed: response_bytes={} preview={:?}",
+                pipeline.label(),
+                buffer.len(),
+                preview_for_log(buffer, 240),
+            );
+        }
 
+        let raw_count = flags.len();
         let mut added = 0usize;
+        let mut anchored = 0usize;
         for f in flags {
             if f.quote.trim().is_empty() {
                 continue;
@@ -884,22 +940,52 @@ impl CkWriterApp {
             // anchor in the prose-stripped string and translate by string search.
             let anchor_in_text = anchor(&self.editor_text, &f.quote)
                 .or_else(|| anchor(&prose, &f.quote).and_then(|_| anchor(&self.editor_text, f.quote.trim())));
+            if anchor_in_text.is_some() {
+                anchored += 1;
+            }
+
+            // Only the spelling pipeline ships per-flag categories;
+            // voice/show/prose collapse to FlagKind::Other and are coloured
+            // by their pipeline instead.
+            let kind = if pipeline == Pipeline::Spelling {
+                FlagKind::parse(&f.kind)
+            } else {
+                FlagKind::Other
+            };
 
             let id = self.next_rev_id;
             self.next_rev_id += 1;
             self.revisions.push(Revision {
                 id,
                 pipeline,
+                kind,
                 quote: f.quote.clone(),
                 why: f.why.clone(),
                 suggestion: f.suggestion.clone(),
                 anchor: anchor_in_text,
-                status: RevisionStatus::Pending,
             });
             added += 1;
         }
+        // Sort by position in the source so the cards read in reading order;
+        // unanchored flags sink to the bottom. Stable sort preserves id order
+        // among same-position ties.
+        self.revisions
+            .sort_by_key(|r| r.anchor.map(|(s, _)| s).unwrap_or(usize::MAX));
+        log::info!(
+            "pipeline={} ingested: parsed_ok={parsed_ok} raw_flags={raw_count} added={added} anchored={anchored} response_bytes={}",
+            pipeline.label(),
+            buffer.len(),
+        );
         if added == 0 {
-            self.last_error = Some(format!("{}: no flags returned (or JSON parse failed)", pipeline.label()));
+            let msg = if !parsed_ok {
+                format!(
+                    "{}: JSON parse failed — model likely returned prose, not JSON (see log)",
+                    pipeline.label()
+                )
+            } else {
+                format!("{}: model returned 0 flags", pipeline.label())
+            };
+            self.last_error = Some(msg);
         }
     }
 
@@ -910,23 +996,24 @@ impl CkWriterApp {
         if e > self.editor_text.len() || s > e {
             return;
         }
+        if self.selected_revision == Some(id) {
+            self.selected_revision = None;
+        }
         self.editor_text.replace_range(s..e, &rev.suggestion);
         self.dirty = true;
-        // Shift other anchors that come after this point.
+        // Drop the accepted revision and shift remaining anchors past the
+        // replacement point. Overlapping anchors lose their position because
+        // the underlying span no longer exists.
         let delta = rev.suggestion.len() as isize - (e - s) as isize;
+        self.revisions.remove(idx);
         for r in &mut self.revisions {
-            if r.id == id {
-                r.status = RevisionStatus::Accepted;
-                r.anchor = None;
-                continue;
-            }
             if let Some((rs, re)) = r.anchor {
                 if rs >= e {
                     let new_s = (rs as isize + delta).max(0) as usize;
                     let new_e = (re as isize + delta).max(0) as usize;
                     r.anchor = Some((new_s, new_e));
                 } else if re > s {
-                    r.anchor = None; // overlaps replaced region
+                    r.anchor = None;
                 }
             }
         }
@@ -934,9 +1021,27 @@ impl CkWriterApp {
     }
 
     pub fn dismiss_revision(&mut self, id: u32) {
-        if let Some(r) = self.revisions.iter_mut().find(|r| r.id == id) {
-            r.status = RevisionStatus::Dismissed;
-            r.anchor = None;
+        self.revisions.retain(|r| r.id != id);
+        if self.selected_revision == Some(id) {
+            self.selected_revision = None;
+        }
+    }
+
+    /// Select a revision card and jump the editor to its anchor. Toggling the
+    /// same revision off returns nothing to the editor (cursor stays put).
+    pub fn select_revision(&mut self, id: u32) {
+        if self.selected_revision == Some(id) {
+            self.selected_revision = None;
+            return;
+        }
+        let anchor = self
+            .revisions
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.anchor);
+        self.selected_revision = Some(id);
+        if let Some((s, _)) = anchor {
+            self.jump_to_anchor(s);
         }
     }
 
@@ -1001,6 +1106,17 @@ impl CkWriterApp {
                 self.pdf_build_rx = None;
             }
         }
+    }
+
+    /// Scroll the editor so the byte at `byte_start` is in view, and place
+    /// the cursor there. Used by the AI panel's "Jump" button so the writer
+    /// can see a flagged passage in context before accepting the suggestion.
+    pub fn jump_to_anchor(&mut self, byte_start: usize) {
+        let cap = byte_start.min(self.editor_text.len());
+        let line = self.editor_text[..cap].bytes().filter(|&b| b == b'\n').count();
+        let char_idx = self.editor_text[..cap].chars().count();
+        self.pending_scroll_line = Some(line);
+        self.pending_cursor_char = Some(char_idx);
     }
 
     pub fn jump_to_source(&mut self, file: &Path, line: u32) {
@@ -1139,6 +1255,20 @@ fn apply_mirror_op(book: &mut Book, self_id: &str, op: MirrorOp) -> anyhow::Resu
         }
     }
     Ok(())
+}
+
+fn preview_for_log(s: &str, max: usize) -> String {
+    let escaped: String = s
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    if escaped.chars().count() <= max {
+        escaped
+    } else {
+        let mut out: String = escaped.chars().take(max).collect();
+        out.push_str("…");
+        out
+    }
 }
 
 fn kind_singular_id(k: EntityKind) -> &'static str {

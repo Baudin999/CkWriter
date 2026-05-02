@@ -8,6 +8,40 @@ pub struct RawFlag {
     pub why: String,
     #[serde(default)]
     pub suggestion: String,
+    /// Spelling-pipeline only: "spelling" | "punctuation" | "grammar".
+    /// Empty for voice/show/prose since those have a single category each.
+    #[serde(default)]
+    pub kind: String,
+}
+
+/// Sub-category of a spelling-pipeline flag. Voice/show/prose flags carry
+/// `Other`; their colour comes from the pipeline instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagKind {
+    Spelling,
+    Punctuation,
+    Grammar,
+    Other,
+}
+
+impl FlagKind {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "spelling" | "spell" => Self::Spelling,
+            "punctuation" | "punct" => Self::Punctuation,
+            "grammar" | "gram" => Self::Grammar,
+            _ => Self::Other,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Spelling => "spelling",
+            Self::Punctuation => "punctuation",
+            Self::Grammar => "grammar",
+            Self::Other => "",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,19 +66,12 @@ pub struct RawFlagsOnly {
 pub struct Revision {
     pub id: u32,
     pub pipeline: super::prompts::Pipeline,
+    pub kind: FlagKind,
     pub quote: String,
     pub why: String,
     pub suggestion: String,
     /// (start, end) byte offsets in the editor buffer; `None` if anchoring failed.
     pub anchor: Option<(usize, usize)>,
-    pub status: RevisionStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RevisionStatus {
-    Pending,
-    Accepted,
-    Dismissed,
 }
 
 pub fn parse_voice(buf: &str) -> Option<RawVoice> {

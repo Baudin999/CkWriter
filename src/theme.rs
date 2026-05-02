@@ -13,6 +13,10 @@ pub const ENTITY_LOCATION: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
 pub const REVISION_VOICE: Color32 = Color32::from_rgb(0xf7, 0xc8, 0x6a);
 pub const REVISION_SHOW: Color32 = Color32::from_rgb(0x7a, 0xc8, 0xf7);
 pub const REVISION_PROSE: Color32 = Color32::from_rgb(0xc8, 0x7a, 0xf7);
+pub const REVISION_SPELLING: Color32 = Color32::from_rgb(0xf7, 0x6a, 0x6a);
+pub const REVISION_PUNCTUATION: Color32 = Color32::from_rgb(0xf7, 0xa8, 0x6a);
+pub const REVISION_GRAMMAR: Color32 = Color32::from_rgb(0xa8, 0xc8, 0x7a);
+pub const REVISION_SELECTED_BG: Color32 = Color32::from_rgb(0x33, 0x2c, 0x2c);
 
 pub const WRITER_FAMILY: &str = "writer";
 
