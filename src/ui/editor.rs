@@ -508,6 +508,45 @@ pub fn revision_color(rev: &Revision) -> Color32 {
     }
 }
 
+/// Source of a span's visual contribution. Entities and revisions paint the
+/// same `TextFormat` slots (color, underline, background) but with different
+/// rules: revisions stack and use the foreground for the underline, entities
+/// recolor the glyph and underline themselves at low intensity.
+#[derive(Clone, Copy)]
+enum LayerKind {
+    Entity,
+    Revision,
+}
+
+#[derive(Clone, Copy)]
+struct Layer {
+    start: usize,
+    end: usize,
+    color: Color32,
+    kind: LayerKind,
+    /// Higher wins as the sub-span's primary contributor. Selected revision
+    /// pins to 255 so a click is always the loudest signal in the region.
+    priority: u8,
+    selected: bool,
+}
+
+/// Background alpha applied to the selected revision's chip color. ~33%
+/// reads cleanly on EDITOR_PAGE without obscuring glyphs — the previous
+/// flat #332c2c ran at ~7% luminance delta and was effectively invisible.
+const SELECTED_TINT_ALPHA: u8 = 0x55;
+
+/// Background alpha applied to the secondary revision in an unselected
+/// overlap region. Quiet enough to read as "another flag also lives here"
+/// without competing with the primary's underline.
+const OVERLAP_TINT_ALPHA: u8 = 0x28;
+
+/// Premultiplied tint of `color` over whatever is behind the glyph. We use
+/// alpha rather than pre-blending against `EDITOR_PAGE` so the highlight
+/// stays correct if the editor surface ever changes color (egui blends).
+fn revision_tint(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
 fn build_job(
     text: &str,
     font_size: f32,
@@ -526,48 +565,133 @@ fn build_job(
         ..Default::default()
     };
 
-    let mut spans: Vec<(usize, usize, TextFormat)> = Vec::new();
+    let text_len = text.len();
+    let valid_range = |s: usize, e: usize| {
+        s < e
+            && e <= text_len
+            && text.is_char_boundary(s)
+            && text.is_char_boundary(e)
+    };
+
+    let mut layers: Vec<Layer> = Vec::new();
     for h in hits {
+        if !valid_range(h.start, h.end) {
+            continue;
+        }
         let color = match h.kind {
             EntityKind::Character => theme::ENTITY_CHARACTER,
             EntityKind::Location => theme::ENTITY_LOCATION,
             _ => theme::TEXT_PRIMARY,
         };
-        let mut f = base.clone();
-        f.color = color;
-        f.underline = Stroke::new(1.0, color.linear_multiply(0.6));
-        spans.push((h.start, h.end, f));
+        layers.push(Layer {
+            start: h.start,
+            end: h.end,
+            color,
+            kind: LayerKind::Entity,
+            priority: 0,
+            selected: false,
+        });
     }
     for r in revisions {
-        if let Some((s, e)) = r.anchor {
-            let color = revision_color(r);
-            let selected = selected_revision == Some(r.id);
-            let mut f = base.clone();
-            // Selected revision wins visually: thicker underline + tinted
-            // background so the writer can spot the active edit at a glance.
-            if selected {
-                f.underline = Stroke::new(3.0, color);
-                f.background = theme::REVISION_SELECTED_BG;
-            } else {
-                f.underline = Stroke::new(2.0, color);
-            }
-            spans.push((s, e, f));
-        }
-    }
-    spans.sort_by_key(|(s, _, _)| *s);
-
-    let mut cursor = 0usize;
-    for (s, e, fmt) in spans {
-        if s < cursor || e > text.len() || s >= e {
+        let Some((s, e)) = r.anchor else { continue };
+        if !valid_range(s, e) {
             continue;
         }
+        let selected = selected_revision == Some(r.id);
+        // Priority ordering: selected (255) > any revision (100..=103) >
+        // entity (0). Within revisions, pipeline_byte gives Spelling > Prose
+        // > ShowDontTell > Voice — matches the design notes' "spelling-family
+        // > pipeline" precedence in overlap regions.
+        let priority = if selected {
+            255
+        } else {
+            100 + pipeline_byte(r.pipeline)
+        };
+        layers.push(Layer {
+            start: s,
+            end: e,
+            color: revision_color(r),
+            kind: LayerKind::Revision,
+            priority,
+            selected,
+        });
+    }
+
+    if layers.is_empty() {
+        if !text.is_empty() {
+            job.append(text, 0.0, base);
+        }
+        return job;
+    }
+
+    // Atomic boundaries: every layer start/end becomes a split point, so
+    // each [boundaries[i], boundaries[i+1]) sub-range is covered by a
+    // constant set of layers. This is what lets two overlapping revisions
+    // both contribute formatting — the previous algorithm dropped any span
+    // starting before the running cursor and the second revision vanished.
+    let mut boundaries: Vec<usize> =
+        layers.iter().flat_map(|l| [l.start, l.end]).collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut cursor = 0usize;
+    for window in boundaries.windows(2) {
+        let s = window[0];
+        let e = window[1];
         if cursor < s {
             job.append(&text[cursor..s], 0.0, base.clone());
         }
+        let participants: Vec<&Layer> = layers
+            .iter()
+            .filter(|l| l.start <= s && l.end >= e)
+            .collect();
+        if participants.is_empty() {
+            job.append(&text[s..e], 0.0, base.clone());
+            cursor = e;
+            continue;
+        }
+        let primary = participants
+            .iter()
+            .copied()
+            .max_by_key(|l| l.priority)
+            .expect("non-empty");
+        let revision_layers: Vec<&Layer> = participants
+            .iter()
+            .copied()
+            .filter(|l| matches!(l.kind, LayerKind::Revision))
+            .collect();
+        let selected_layer = revision_layers.iter().copied().find(|l| l.selected);
+
+        let mut fmt = base.clone();
+        match primary.kind {
+            LayerKind::Entity => {
+                fmt.color = primary.color;
+                fmt.underline = Stroke::new(1.0, primary.color.linear_multiply(0.6));
+            }
+            LayerKind::Revision => {
+                let width = if primary.selected { 3.0 } else { 2.0 };
+                fmt.underline = Stroke::new(width, primary.color);
+            }
+        }
+
+        if let Some(sel) = selected_layer {
+            // Selected anywhere in this sub-range: paint a chip-matching
+            // tint so the writer can locate the click target at a glance.
+            fmt.background = revision_tint(sel.color, SELECTED_TINT_ALPHA);
+        } else if revision_layers.len() >= 2 {
+            // Two or more unselected revisions stack here: the primary
+            // underlines the region; the secondary's color shows through
+            // as a subtle background tint so a click on the dropped card
+            // can't read as a no-op.
+            let mut sorted = revision_layers.clone();
+            sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
+            fmt.background = revision_tint(sorted[1].color, OVERLAP_TINT_ALPHA);
+        }
+
         job.append(&text[s..e], 0.0, fmt);
         cursor = e;
     }
-    if cursor < text.len() {
+    if cursor < text_len {
         job.append(&text[cursor..], 0.0, base);
     }
     job
@@ -1215,5 +1339,129 @@ mod tests {
         assert_eq!(byte_to_char(s, 5), 4); // after "é"
         // Mid-codepoint byte (4) snaps back to the previous boundary (3).
         assert_eq!(byte_to_char(s, 4), 3);
+    }
+
+    // --- build_job overlap + selected indicator (#0026) -------------------
+
+    fn coach_revision(id: u32, pipeline: Pipeline, anchor: (usize, usize)) -> Revision {
+        Revision {
+            id,
+            pipeline,
+            kind: match pipeline {
+                Pipeline::Spelling => FlagKind::Spelling,
+                _ => FlagKind::Other,
+            },
+            quote: String::new(),
+            why: String::new(),
+            suggestion: String::new(),
+            anchor: Some(anchor),
+            suggestion_id: format!("sid-{id}"),
+            paragraph_id: None,
+            is_dismissed: false,
+        }
+    }
+
+    fn run_build_job(text: &str, revisions: &[Revision], selected: Option<u32>) -> LayoutJob {
+        build_job(
+            text,
+            18.0,
+            30.0,
+            &FontFamily::Proportional,
+            &[],
+            revisions,
+            selected,
+        )
+    }
+
+    #[test]
+    fn overlapping_revisions_both_contribute_formatting() {
+        // Regression: the previous algorithm walked spans sorted by start
+        // and skipped any whose start fell before the running cursor, which
+        // silently dropped the second flag in any overlap. Both
+        // revisions' colors must now appear somewhere in the LayoutJob's
+        // section list — a click on the dropped card no longer reads as a
+        // no-op.
+        let text = "the quick brown fox jumps over the lazy dog and runs.";
+        let prose = coach_revision(1, Pipeline::Prose, (4, 19)); // "quick brown fox"
+        let spelling = coach_revision(2, Pipeline::Spelling, (10, 25)); // "brown fox jumps"
+
+        let job = run_build_job(text, &[prose, spelling], None);
+
+        let prose_color = theme::REVISION_PROSE;
+        let spelling_color = theme::REVISION_SPELLING;
+        let prose_present = job
+            .sections
+            .iter()
+            .any(|s| s.format.underline.color == prose_color);
+        let spelling_present = job
+            .sections
+            .iter()
+            .any(|s| s.format.underline.color == spelling_color);
+        assert!(
+            prose_present,
+            "prose revision must contribute formatting: {:#?}",
+            job.sections
+        );
+        assert!(
+            spelling_present,
+            "spelling revision must contribute formatting: {:#?}",
+            job.sections
+        );
+    }
+
+    #[test]
+    fn coincident_unselected_overlap_keeps_secondary_color_visible() {
+        // When two revisions share the exact same anchor with no selection,
+        // there's only one sub-range to format. The lower-priority flag
+        // still gets a visual hand-off via a tinted background — without
+        // it, the dropped card would feel dead even after the overlap fix.
+        let text = "the quick brown fox";
+        let show = coach_revision(1, Pipeline::ShowDontTell, (4, 9));
+        let spelling = coach_revision(2, Pipeline::Spelling, (4, 9));
+
+        let job = run_build_job(text, &[show, spelling], None);
+
+        let overlap = job
+            .sections
+            .iter()
+            .find(|s| s.byte_range.start == 4 && s.byte_range.end == 9)
+            .expect("overlap section");
+        // Spelling has the higher pipeline_byte, so it wins the underline.
+        assert_eq!(overlap.format.underline.color, theme::REVISION_SPELLING);
+        // Show's color shows through as the background tint — exact value
+        // pinned so we catch accidental regressions of the alpha constant.
+        assert_eq!(
+            overlap.format.background,
+            revision_tint(theme::REVISION_SHOW, OVERLAP_TINT_ALPHA),
+        );
+    }
+
+    #[test]
+    fn selected_revision_paints_chip_tinted_background() {
+        // The previous code painted REVISION_SELECTED_BG (#332c2c) for the
+        // selected span — ~7% luminance delta against EDITOR_PAGE, visually
+        // a non-event. The new behaviour tints with the revision's own
+        // color so the highlight matches the card chip the writer clicked.
+        let text = "the quick brown fox";
+        let r = coach_revision(7, Pipeline::Prose, (4, 9));
+
+        let job = run_build_job(text, &[r], Some(7));
+
+        let section = job
+            .sections
+            .iter()
+            .find(|s| s.byte_range.start == 4 && s.byte_range.end == 9)
+            .expect("selected section");
+        assert_eq!(
+            section.format.background,
+            revision_tint(theme::REVISION_PROSE, SELECTED_TINT_ALPHA),
+        );
+        // Selected underline thickens to 3px so short spans stay legible.
+        assert!(
+            (section.format.underline.width - 3.0).abs() < f32::EPSILON,
+            "selected underline must be 3px, got {}",
+            section.format.underline.width
+        );
+        assert_eq!(section.format.underline.color, theme::REVISION_PROSE);
     }
 }
