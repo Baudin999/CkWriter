@@ -39,6 +39,14 @@ impl<T: Clone + PartialEq> Form<T> {
         &self.draft
     }
 
+    /// Mutable view of the working buffer for surfaces that render inline
+    /// (their own title/buttons) rather than going through [`render`]. Use
+    /// the closure form on `render` whenever the standard layout fits;
+    /// reach for this only when the surface needs custom chrome.
+    pub fn draft_mut(&mut self) -> &mut T {
+        &mut self.draft
+    }
+
     pub fn original(&self) -> &T {
         &self.original
     }

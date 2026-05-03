@@ -4,6 +4,7 @@ use crate::extract;
 use crate::llm::characters::{ProposalStatus, ProposalVerdict};
 use crate::theme;
 use egui::{Color32, RichText};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -899,6 +900,9 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         });
     ui.separator();
 
+    show_paragraph_note_section(app, ui);
+    ui.separator();
+
     let pending = app.revisions.len();
     ui.label(format!("{pending} pending suggestions"));
     ui.separator();
@@ -908,6 +912,14 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     let mut dismiss_id: Option<u32> = None;
     let mut undismiss_id: Option<u32> = None;
     let mut select_id: Option<u32> = None;
+    let mut save_dismissal_note: Option<(String, String)> = None;
+    // Snapshot revisions so the iteration body can take `&mut app` borrows
+    // (for the dismissal-note form HashMap) without colliding with the
+    // outer `&app.revisions`. Cheap — Revision is small and bounded by
+    // pending-suggestion count.
+    let revisions_snapshot: Vec<crate::llm::revision::Revision> = app.revisions.clone();
+    let live_dismissal_notes: HashMap<String, String> =
+        collect_live_dismissal_notes(app, &revisions_snapshot);
     egui::ScrollArea::vertical()
         .id_salt("revisions-scroll")
         .auto_shrink([false; 2])
@@ -925,7 +937,7 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 .text_styles
                 .insert(egui::TextStyle::Small, egui::FontId::proportional(12.5));
 
-            for rev in &app.revisions {
+            for rev in &revisions_snapshot {
                 let color = crate::ui::editor::revision_color(rev);
                 let selected = selected_id == Some(rev.id);
                 let card_resp = revision_card(ui, rev, color, selected);
@@ -946,6 +958,20 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 if card_resp.dismiss_clicked {
                     dismiss_id = Some(rev.id);
                 }
+                if rev.is_dismissed {
+                    let live = live_dismissal_notes
+                        .get(&rev.suggestion_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(saved) = dismissal_note_editor(
+                        ui,
+                        &mut app.dismissal_note_forms,
+                        &rev.suggestion_id,
+                        &live,
+                    ) {
+                        save_dismissal_note = Some((rev.suggestion_id.clone(), saved));
+                    }
+                }
             }
         });
     if let Some(id) = select_id {
@@ -960,6 +986,232 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     if let Some(id) = undismiss_id {
         app.undismiss_revision(id);
     }
+    if let Some((suggestion_id, note)) = save_dismissal_note {
+        app.save_dismissal_note(&suggestion_id, &note);
+        if let Some(form) = app.dismissal_note_forms.get_mut(&suggestion_id) {
+            form.mark_saved();
+        }
+    }
+}
+
+/// Read the live `dismissal_note` for every Dismissed revision in the
+/// current snapshot, keyed by `suggestion_id`. Pulled in one immutable
+/// pass so the iteration loop downstream can hold a `&mut` on the form
+/// HashMap without re-borrowing the chapter store inside the loop.
+fn collect_live_dismissal_notes(
+    app: &CkWriterApp,
+    revisions: &[crate::llm::revision::Revision],
+) -> HashMap<String, String> {
+    let Some(book) = app.book.as_ref() else {
+        return HashMap::new();
+    };
+    let Some(ch) = app.current_chapter.as_ref() else {
+        return HashMap::new();
+    };
+    let Some(store) = book.suggestions.for_chapter(&ch.folder, &ch.name) else {
+        return HashMap::new();
+    };
+    revisions
+        .iter()
+        .filter(|r| r.is_dismissed)
+        .filter_map(|r| {
+            let rec = store.records.get(&r.suggestion_id)?;
+            Some((
+                r.suggestion_id.clone(),
+                rec.dismissal_note.clone().unwrap_or_default(),
+            ))
+        })
+        .collect()
+}
+
+/// Render the dismissal-reason textbox + Save / Revert beneath a Dismissed
+/// card. Returns `Some(draft)` on Save click — caller persists. Lazy-seeds
+/// the form on first render against the live note from disk; rebases when
+/// clean so external rewrites flow in without prompting.
+fn dismissal_note_editor(
+    ui: &mut egui::Ui,
+    forms: &mut HashMap<String, crate::ui::forms::Form<String>>,
+    suggestion_id: &str,
+    live_note: &str,
+) -> Option<String> {
+    let form = forms
+        .entry(suggestion_id.to_string())
+        .or_insert_with(|| crate::ui::forms::Form::new(&live_note.to_string()));
+    form.rebase_if_clean(&live_note.to_string());
+    let dirty = form.dirty();
+    let mut save = false;
+    let mut revert = false;
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 18,
+            right: 0,
+            top: 2,
+            bottom: 6,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("why dismissed?")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                if dirty {
+                    ui.label(
+                        RichText::new("●")
+                            .color(theme::ACCENT)
+                            .small()
+                            .strong(),
+                    );
+                }
+            });
+            ui.add(
+                egui::TextEdit::multiline(form.draft_mut())
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(
+                        "tell the AI why this is wrong feedback — \
+                         it'll see the reason next run.",
+                    ),
+            );
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(dirty, egui::Button::new("Save"))
+                    .clicked()
+                {
+                    save = true;
+                }
+                if ui
+                    .add_enabled(dirty, egui::Button::new("Revert"))
+                    .clicked()
+                {
+                    revert = true;
+                }
+            });
+        });
+    if revert {
+        form.revert();
+    }
+    if save { Some(form.draft().clone()) } else { None }
+}
+
+/// Per-paragraph guidance note section above the coach cards (#0027).
+/// The textbox is anchored to a single `paragraph_id` at a time — when the
+/// editor cursor moves to a different paragraph we re-anchor only if the
+/// form is currently clean, so a half-typed note isn't silently lost when
+/// the writer clicks back into the editor mid-thought.
+fn show_paragraph_note_section(app: &mut CkWriterApp, ui: &mut egui::Ui) {
+    if app.book.is_none() || app.current_chapter.is_none() {
+        return;
+    }
+    let cursor_pid = app.cursor_paragraph_id(ui.ctx());
+
+    // Anchor resolution: if no form yet, anchor to the cursor's paragraph
+    // (if any). If a form exists and is clean, rebase to the cursor's
+    // paragraph so the textbox always tracks where the writer is. If
+    // dirty, keep the previous anchor — the writer is mid-edit.
+    let mut anchor_pid: Option<String> = match (&app.paragraph_note_form, cursor_pid.as_ref()) {
+        (Some((stored, form)), Some(cursor)) if stored == cursor => Some(stored.clone()),
+        (Some((stored, form)), Some(_)) if form.dirty() => Some(stored.clone()),
+        (Some(_), Some(cursor)) => Some(cursor.clone()),
+        (Some((stored, form)), None) if form.dirty() => Some(stored.clone()),
+        (None, Some(cursor)) => Some(cursor.clone()),
+        _ => None,
+    };
+
+    let Some(pid) = anchor_pid.take() else {
+        ui.label(
+            RichText::new("Click into a paragraph to add author guidance.")
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+        return;
+    };
+
+    let live_note = app
+        .current_chapter
+        .as_ref()
+        .and_then(|c| c.meta.paragraph_notes.get(&pid).cloned())
+        .unwrap_or_default();
+
+    // Lazy-seed and rebase the form. `take` detaches it so the body
+    // closure has clean borrow access; we put it back below.
+    let mut entry = match app.paragraph_note_form.take() {
+        Some((stored_pid, mut form)) if stored_pid == pid => {
+            form.rebase_if_clean(&live_note);
+            (stored_pid, form)
+        }
+        _ => (pid.clone(), crate::ui::forms::Form::new(&live_note)),
+    };
+
+    let cursor_elsewhere = cursor_pid.as_deref() != Some(entry.0.as_str());
+    let dirty = entry.1.dirty();
+    let mut save = false;
+    let mut revert = false;
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Paragraph notes")
+                        .small()
+                        .strong()
+                        .color(theme::TEXT_MUTED),
+                );
+                if dirty {
+                    ui.label(
+                        RichText::new("●")
+                            .color(theme::ACCENT)
+                            .small()
+                            .strong(),
+                    )
+                    .on_hover_text("unsaved changes");
+                }
+                if cursor_elsewhere {
+                    ui.label(
+                        RichText::new("(cursor moved — finish or revert)")
+                            .small()
+                            .color(theme::ACCENT),
+                    );
+                }
+            });
+            ui.add(
+                egui::TextEdit::multiline(entry.1.draft_mut())
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(
+                        "what is this paragraph supposed to do? \
+                         the AI reads this before flagging.",
+                    ),
+            );
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(dirty, egui::Button::new("Save"))
+                    .clicked()
+                {
+                    save = true;
+                }
+                if ui
+                    .add_enabled(dirty, egui::Button::new("Revert"))
+                    .clicked()
+                {
+                    revert = true;
+                }
+            });
+        });
+
+    let pid_for_save = entry.0.clone();
+    let draft_for_save = entry.1.draft().clone();
+    if save {
+        app.save_paragraph_note(&pid_for_save, &draft_for_save);
+        entry.1.mark_saved();
+    }
+    if revert {
+        entry.1.revert();
+    }
+    app.paragraph_note_form = Some(entry);
 }
 
 struct RevisionCardEvents {

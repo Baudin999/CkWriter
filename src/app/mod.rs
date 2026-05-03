@@ -199,6 +199,20 @@ pub struct CkWriterApp {
     /// on first render of the Chapter tab.
     pub chapter_form: Option<Form<ChapterMeta>>,
 
+    /// Forms-framework draft for the per-paragraph author guidance note
+    /// (#0027). Anchored to a single paragraph_id at a time — when the
+    /// editor cursor moves to a different paragraph, the form re-anchors
+    /// only if it's currently clean. Save persists into
+    /// `ChapterMeta::paragraph_notes` via the chapter-meta write path.
+    pub paragraph_note_form: Option<(String, Form<String>)>,
+
+    /// Forms-framework drafts for the per-dismissal reason notes (#0027),
+    /// keyed by `SuggestionRecord::id` (the persistent suggestion-store id,
+    /// not the runtime u32 — the hash survives chapter reload). Populated
+    /// lazily the first time a Dismissed card renders; entries never need
+    /// to drop because the per-card map is bounded by chapter size.
+    pub dismissal_note_forms: HashMap<String, Form<String>>,
+
     // === Shared discard prompt ===
     /// User-initiated navigation deferred behind the discard prompt. Set by
     /// `request_*` helpers when any form is dirty; cleared by the modal's
@@ -305,6 +319,8 @@ impl CkWriterApp {
             delete_chapter_confirm: None,
             chapter_op_error: None,
             chapter_form: None,
+            paragraph_note_form: None,
+            dismissal_note_forms: HashMap::new(),
             pending_nav: None,
             read_mode: false,
             pdf_building: false,

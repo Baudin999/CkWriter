@@ -462,6 +462,97 @@ impl super::CkWriterApp {
         }
     }
 
+    /// Resolve the editor cursor's current paragraph_id, if any. Reads the
+    /// editor's `TextEditState` (which lives in `egui::Memory` keyed by the
+    /// editor's `Id`) and walks the live paragraph index to find the one
+    /// whose `char_range` contains the cursor's byte offset.
+    ///
+    /// Returns `None` when no chapter is open, the cursor isn't loaded
+    /// (cold cache, no clicks yet), or the cursor falls outside every
+    /// paragraph (between paragraphs, in a comment-only block).
+    pub fn cursor_paragraph_id(&self, ctx: &egui::Context) -> Option<String> {
+        use egui::widgets::text_edit::TextEditState;
+        let editor_id = egui::Id::new("ckwriter-editor");
+        let state = TextEditState::load(ctx, editor_id)?;
+        let range = state.cursor.char_range()?;
+        let char_idx = range.primary.index;
+        let byte = self
+            .editor_text
+            .char_indices()
+            .nth(char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(self.editor_text.len());
+        self.current_paragraphs
+            .iter()
+            .find(|p| {
+                let (s, e) = p.char_range;
+                byte >= s && byte < e
+            })
+            .map(|p| p.id.clone())
+    }
+
+    /// Persist the per-paragraph guidance note for `paragraph_id` (#0027).
+    /// Empty / whitespace-only `note` removes the entry entirely so the
+    /// chapter store doesn't accumulate empty-string keys; otherwise the
+    /// trimmed text is written verbatim. Reuses `update_chapter_meta` for
+    /// the disk + in-memory mirror, identical to `save_chapter_form` —
+    /// stays out of the chapter form's draft so the AI tab can edit
+    /// independently of the Chapter tab's dirty state.
+    pub fn save_paragraph_note(&mut self, paragraph_id: &str, note: &str) {
+        let Some(ch) = self.current_chapter.as_ref() else {
+            return;
+        };
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        if folder.is_empty() || name.is_empty() {
+            return;
+        }
+        let trimmed = note.trim().to_string();
+        let pid = paragraph_id.to_string();
+        self.update_chapter_meta(&folder, &name, |m| {
+            if trimmed.is_empty() {
+                m.paragraph_notes.remove(&pid);
+            } else {
+                m.paragraph_notes.insert(pid.clone(), trimmed.clone());
+            }
+        });
+    }
+
+    /// Persist the per-dismissal reason note for the suggestion identified
+    /// by `suggestion_id` (#0027). Empty / whitespace-only `note` clears
+    /// the field back to `None` so an empty annotation doesn't render as
+    /// a dangling em-dash in the AI prompt's "Already reviewed" section.
+    pub fn save_dismissal_note(&mut self, suggestion_id: &str, note: &str) {
+        let Some(ch) = self.current_chapter.as_ref().cloned() else {
+            return;
+        };
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        if folder.is_empty() || name.is_empty() {
+            return;
+        }
+        let trimmed = note.trim().to_string();
+        let Some(book) = self.book.as_mut() else {
+            return;
+        };
+        let root = book.root.clone();
+        let chapter_store = book.suggestions.for_chapter_mut(&root, &folder, &name);
+        let Some(rec) = chapter_store.records.get_mut(suggestion_id) else {
+            log::warn!(
+                "save_dismissal_note: suggestion id {suggestion_id:?} not in chapter store {folder}/{name}"
+            );
+            return;
+        };
+        rec.dismissal_note = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+        if let Err(e) = book.suggestions.save_chapter(&root, &folder, &name) {
+            log::warn!("dismissal-note save failed: {e}");
+        }
+    }
+
     /// Scroll the editor so the byte at `byte_start` is in view, and place
     /// the cursor there. Used by the AI panel's selected-card flow so the
     /// writer can see a flagged passage in context before accepting it.
