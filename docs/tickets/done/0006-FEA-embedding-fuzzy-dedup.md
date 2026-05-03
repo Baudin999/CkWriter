@@ -34,3 +34,13 @@ String normalization in the dismissal filter catches whitespace and case variati
 - Don't start work on this ticket until #0004 has shipped and we have data on residual duplicate rates. If duplicates are <5% of flags after #0004, this ticket is closed without implementing.
 - Embedding cache file path: `Info/embeddings/<folder>/<name>.json` — sidecar per chapter, keyed by suggestion_id.
 - Cosine similarity threshold tuning: gather a small labeled set of dup/non-dup pairs from real coach runs before locking the default.
+
+## Status notes
+Closed without building 2026-05-03. Per the ticket's own wait-and-see gate, the writer reports no observed paraphrase-duplicates surviving the two layers that already exist:
+
+1. **Prompt layer** — `src/llm/prompts.rs::build_user_with_history` (#0025) sends prior Dismissed/Accepted quotes back to the model with explicit "do NOT include them in `flags`" wording on every per-paragraph run.
+2. **Ingest layer** — `src/book/suggestions.rs::fuzzy_match_record_id` (#0025) drops new flags whose normalized quote substring-matches OR Jaccard-matches (≥ 0.7) any existing non-Stale record in the same `(pipeline, paragraph_id)`.
+
+Embedding dedup remains a defensible third layer if paraphrase-dups ever break through both, but the cost (Ollama dependency, threshold tuning, latency budget) isn't justified by observed pain. Reopen if that changes.
+
+The writer-supervised side of "this is the same flag as that one" — which embeddings can't do without curation anyway — is filed separately as #0027.
