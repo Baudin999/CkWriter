@@ -13,6 +13,7 @@
 use crate::book::paragraphs::ParagraphMeta;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,13 @@ pub struct ChapterMeta {
     /// save. See `book::paragraphs` for the splitter and matcher.
     #[serde(default)]
     pub paragraphs: Vec<ParagraphMeta>,
+    /// Per-pipeline cache of the paragraph hashes seen on the last successful
+    /// run. Outer key is the pipeline label (e.g. `"prose"`); inner key is the
+    /// stable `Paragraph::id`. A current-hash mismatch (or absence) marks the
+    /// paragraph dirty and forces a re-prompt; a match lets the run skip it.
+    /// Voice runs chapter-level and does not populate this map.
+    #[serde(default)]
+    pub last_run_hashes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub fn file_path(root: &Path, folder: &str, name: &str) -> PathBuf {
@@ -105,6 +113,11 @@ mod tests {
     #[test]
     fn round_trips_through_disk() {
         let dir = tempdir();
+        let mut prose_cache = BTreeMap::new();
+        prose_cache.insert("p_12345678".into(), "0123456789abcdef".into());
+        let mut last_run_hashes = BTreeMap::new();
+        last_run_hashes.insert("prose".to_string(), prose_cache);
+
         let meta = ChapterMeta {
             summary: "Hero arrives in town.".into(),
             goals: "Establish stakes.".into(),
@@ -124,10 +137,29 @@ mod tests {
                     hash: "fedcba9876543210".into(),
                 },
             ],
+            last_run_hashes,
         };
         save(&dir, "Modern", "Awakening", &meta).expect("save");
         let loaded = load(&dir, "Modern", "Awakening");
         assert_eq!(loaded, meta);
+    }
+
+    #[test]
+    fn legacy_meta_without_last_run_hashes_loads_empty_cache() {
+        // Sidecars written before #0004 have no `last_run_hashes` field.
+        // serde(default) must turn that into an empty map.
+        let dir = tempdir();
+        let p = file_path(&dir, "Modern", "PreCache");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"summary": "carryover", "paragraphs": [{"id": "p_aaaaaaaa", "hash": "abc"}]}"#,
+        )
+        .unwrap();
+        let meta = load(&dir, "Modern", "PreCache");
+        assert_eq!(meta.summary, "carryover");
+        assert_eq!(meta.paragraphs.len(), 1);
+        assert!(meta.last_run_hashes.is_empty());
     }
 
     #[test]

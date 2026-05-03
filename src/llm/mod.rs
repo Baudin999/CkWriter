@@ -91,6 +91,13 @@ struct ChunkMessage {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Token(String),
+    /// Per-call token totals reported by Ollama on the final chunk. Sent
+    /// once, immediately before `Done`. Either field is `None` when the
+    /// server omits it (older Ollama versions).
+    Stats {
+        prompt_eval: Option<u64>,
+        eval: Option<u64>,
+    },
     Done,
     Error(String),
 }
@@ -100,6 +107,11 @@ pub struct StreamHandle {
     pub buffer: String,
     pub done: bool,
     pub error: Option<String>,
+    /// Tokens the server reported in the prompt; populated when the final
+    /// chunk arrives. `None` until then (and after, when Ollama omits it).
+    pub prompt_eval_tokens: Option<u64>,
+    /// Tokens generated in the response; same lifecycle as `prompt_eval_tokens`.
+    pub eval_tokens: Option<u64>,
     _join: JoinHandle<()>,
 }
 
@@ -110,6 +122,10 @@ impl StreamHandle {
             changed = true;
             match ev {
                 StreamEvent::Token(t) => self.buffer.push_str(&t),
+                StreamEvent::Stats { prompt_eval, eval } => {
+                    self.prompt_eval_tokens = prompt_eval;
+                    self.eval_tokens = eval;
+                }
                 StreamEvent::Done => self.done = true,
                 StreamEvent::Error(e) => {
                     self.error = Some(e);
@@ -158,6 +174,8 @@ pub fn chat_stream(
         buffer: String::new(),
         done: false,
         error: None,
+        prompt_eval_tokens: None,
+        eval_tokens: None,
         _join: join,
     }
 }
@@ -277,6 +295,10 @@ fn run_stream(
                             );
                         }
                     }
+                    let _ = tx.send(StreamEvent::Stats {
+                        prompt_eval: chunk.prompt_eval_count,
+                        eval: chunk.eval_count,
+                    });
                     let _ = tx.send(StreamEvent::Done);
                     return Ok(());
                 }

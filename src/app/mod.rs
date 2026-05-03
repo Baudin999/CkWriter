@@ -40,7 +40,7 @@ impl Default for NewChapterDialog {
 
 mod book;
 mod chat;
-mod coach;
+pub mod coach;
 mod entity;
 mod extract;
 mod pdf;
@@ -113,6 +113,10 @@ pub struct CkWriterApp {
     /// rather than triggering another repair.
     pub stream_is_repair: bool,
     pub last_stream_buffer: Option<String>,
+    /// Orchestration record for the show/prose/spelling pipelines, which now
+    /// run paragraph-by-paragraph (#0004). `None` when no per-paragraph run
+    /// is active. Voice still runs chapter-level and bypasses this.
+    pub coach_run: Option<coach::CoachRun>,
     pub revisions: Vec<Revision>,
     pub next_rev_id: u32,
     /// Which revision card the writer last clicked. Drives the editor jump,
@@ -260,6 +264,7 @@ impl CkWriterApp {
             stream_pipeline: None,
             stream_is_repair: false,
             last_stream_buffer: None,
+            coach_run: None,
             revisions: Vec::new(),
             next_rev_id: 1,
             selected_revision: None,

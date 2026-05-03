@@ -7,18 +7,65 @@ use crate::llm;
 use crate::llm::prompts::Pipeline;
 use crate::llm::revision::{FlagKind, Revision};
 use crate::scope;
+use std::collections::BTreeMap;
+
+/// One paragraph queued for a per-paragraph pipeline run. Captured at queue
+/// build time so a mid-run edit can't shift offsets out from under the
+/// stream loop. The hash is the paragraph's hash *as of the run start* — it
+/// gets written to `last_run_hashes` only after a successful ingest, so a
+/// failed run leaves the prior cache entry intact and the next run still
+/// sees the paragraph as dirty.
+#[derive(Debug, Clone)]
+pub struct PendingParagraph {
+    pub id: String,
+    pub hash: String,
+    pub prose: String,
+}
+
+/// Orchestration state for a per-paragraph pipeline run (show, prose,
+/// spelling). Voice runs chapter-level and does not use this. Lives on the
+/// app between paragraphs while individual streams come and go through
+/// `App::stream`.
+#[derive(Debug)]
+pub struct CoachRun {
+    pub pipeline: Pipeline,
+    pub queue: Vec<PendingParagraph>,
+    /// 0-based index of the paragraph currently being streamed. After every
+    /// paragraph completes (success or unrecoverable parse failure) the
+    /// index advances; when it reaches `queue.len()` the run finalizes.
+    pub current: usize,
+    pub prompt_tokens: u64,
+    pub eval_tokens: u64,
+}
 
 impl super::CkWriterApp {
     pub fn run_pipeline(&mut self, pipeline: Pipeline) {
-        let Some(book) = &self.book else { return };
-        if self.stream.is_some() {
+        if self.book.is_none() {
             return;
         }
+        if self.stream.is_some() || self.coach_run.is_some() {
+            return;
+        }
+        if self.editor_text.trim().is_empty() {
+            self.last_error = Some("nothing to send".into());
+            return;
+        }
+        match pipeline {
+            Pipeline::Voice => self.start_voice_run(),
+            Pipeline::ShowDontTell | Pipeline::Prose | Pipeline::Spelling => {
+                self.start_paragraph_run(pipeline);
+            }
+        }
+    }
+
+    fn start_voice_run(&mut self) {
+        let Some(book) = self.book.as_ref() else { return };
         let prose = latex::to_prose(&self.editor_text);
         if prose.trim().is_empty() {
             self.last_error = Some("nothing to send".into());
             return;
         }
+        let pipeline = Pipeline::Voice;
         let in_scope = scope::voice_context_entities(book, &self.entity_hits);
         let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
         let user = crate::llm::prompts::build_user(&prose);
@@ -43,11 +90,103 @@ impl super::CkWriterApp {
         ];
         // Full-chapter prose can run 40-90KB; 32k tokens fits the system
         // prompt + chapter without truncation. Output cap covers up to ~8
-        // flags' worth of quote/why/suggestion strings. Temperature is
-        // user-tunable from the AI panel — lower values reduce invented flags.
+        // flags' worth of quote/why/suggestion strings.
         let tuning = llm::ChatTuning {
             temperature: self.settings.coach_temperature,
             num_ctx: 32_768,
+            num_predict: 2_048,
+        };
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            true,
+            tuning,
+        );
+        self.stream = Some(handle);
+        self.stream_pipeline = Some(pipeline);
+        self.last_error = None;
+    }
+
+    fn start_paragraph_run(&mut self, pipeline: Pipeline) {
+        let label = pipeline.label().to_string();
+        let cached = self
+            .current_chapter
+            .as_ref()
+            .and_then(|c| c.meta.last_run_hashes.get(&label).cloned())
+            .unwrap_or_default();
+        let dirty = compute_dirty_paragraphs(
+            &self.current_paragraphs,
+            &self.editor_text,
+            &cached,
+        );
+        let chapter_label = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.display_title.as_str())
+            .unwrap_or("<no chapter>");
+        if dirty.is_empty() {
+            log::info!(
+                "pipeline={label} chapter={chapter_label:?} cache hit on all {} paragraph(s) — 0 prompts",
+                self.current_paragraphs.len()
+            );
+            self.last_error = Some(format!(
+                "{label}: all {} paragraph(s) cached — 0 prompts",
+                self.current_paragraphs.len()
+            ));
+            return;
+        }
+        log::info!(
+            "pipeline={label} chapter={chapter_label:?} dirty={}/{} (will issue {} prompt(s))",
+            dirty.len(),
+            self.current_paragraphs.len(),
+            dirty.len(),
+        );
+        self.coach_run = Some(CoachRun {
+            pipeline,
+            queue: dirty,
+            current: 0,
+            prompt_tokens: 0,
+            eval_tokens: 0,
+        });
+        self.start_next_paragraph_stream();
+    }
+
+    /// Kick off the stream for `coach_run.queue[current]`. Caller guarantees
+    /// `coach_run.is_some()` and `current < queue.len()`.
+    fn start_next_paragraph_stream(&mut self) {
+        let Some(run) = self.coach_run.as_ref() else { return };
+        if run.current >= run.queue.len() {
+            return;
+        }
+        let pipeline = run.pipeline;
+        let para = run.queue[run.current].clone();
+        let total = run.queue.len();
+        let idx = run.current;
+        let Some(book) = self.book.as_ref() else { return };
+        let in_scope = scope::voice_context_entities(book, &self.entity_hits);
+        let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
+        let user = crate::llm::prompts::build_user(&para.prose);
+        log::info!(
+            "pipeline={} paragraph {}/{} id={} prose_chars={} system_bytes={} user_bytes={}",
+            pipeline.label(),
+            idx + 1,
+            total,
+            para.id,
+            para.prose.chars().count(),
+            system.len(),
+            user.len(),
+        );
+        let messages = vec![
+            llm::ChatMessage::system(system),
+            llm::ChatMessage::user(user),
+        ];
+        // Per-paragraph prompts carry the same system preamble (voice prompt
+        // + roadmap + cast for show pipeline) but only one paragraph of
+        // prose, so 8k fits comfortably with room for the JSON output.
+        let tuning = llm::ChatTuning {
+            temperature: self.settings.coach_temperature,
+            num_ctx: 8_192,
             num_predict: 2_048,
         };
         let handle = llm::chat_stream(
@@ -67,37 +206,140 @@ impl super::CkWriterApp {
             return;
         };
         let _ = stream.poll();
-        if stream.done {
-            let buffer = std::mem::take(&mut stream.buffer);
-            let pipeline = self.stream_pipeline.take().unwrap_or(Pipeline::Voice);
-            let was_repair = std::mem::take(&mut self.stream_is_repair);
-            let err = stream.error.take();
-            self.stream = None;
-            self.last_stream_buffer = Some(buffer.clone());
-            if let Some(e) = err {
-                self.last_error = Some(e);
+        if !stream.done {
+            return;
+        }
+        let buffer = std::mem::take(&mut stream.buffer);
+        let pipeline = self.stream_pipeline.take().unwrap_or(Pipeline::Voice);
+        let was_repair = std::mem::take(&mut self.stream_is_repair);
+        let err = stream.error.take();
+        let prompt_eval = stream.prompt_eval_tokens.unwrap_or(0);
+        let eval = stream.eval_tokens.unwrap_or(0);
+        self.stream = None;
+        self.last_stream_buffer = Some(buffer.clone());
+
+        if let Some(e) = err {
+            self.last_error = Some(e);
+            // A stream error mid per-paragraph run aborts the whole run;
+            // partial progress (already-cached paragraphs) stays cached.
+            if self.coach_run.is_some() {
+                self.finalize_coach_run(true);
+            }
+            return;
+        }
+
+        let outcome = self.ingest_response(pipeline, &buffer);
+        if outcome == IngestOutcome::NeedsRepair {
+            // Dump the unsalvageable response so we can study the patterns
+            // offline and tighten the salvage parser. Failures from the
+            // first attempt and the repair attempt land in the same dir
+            // with distinct suffixes.
+            let suffix = if was_repair {
+                "broken-after-repair"
+            } else {
+                "broken"
+            };
+            dump_unsalvageable(pipeline, &buffer, suffix);
+            if !was_repair {
+                // One last attempt: hand the broken text back to the model
+                // and ask it to repair the JSON. Guarded by `was_repair`
+                // so a malformed repair response can't trigger another.
+                self.start_json_repair(pipeline, &buffer);
                 return;
             }
-            let outcome = self.ingest_response(pipeline, &buffer);
-            if outcome == IngestOutcome::NeedsRepair {
-                // Dump the unsalvageable response so we can study the patterns
-                // offline and tighten the salvage parser. Failures from the
-                // first attempt and the repair attempt land in the same dir
-                // with distinct suffixes.
-                let suffix = if was_repair {
-                    "broken-after-repair"
-                } else {
-                    "broken"
-                };
-                dump_unsalvageable(pipeline, &buffer, suffix);
-                if !was_repair {
-                    // One last attempt: hand the broken text back to the model
-                    // and ask it to repair the JSON. Guarded by `was_repair`
-                    // so a malformed repair response can't trigger another.
-                    self.start_json_repair(pipeline, &buffer);
-                }
+            // Repair also failed. For a per-paragraph run we still want the
+            // queue to advance — leave the cache entry untouched so the
+            // paragraph re-prompts on the next run, but don't get stuck.
+        }
+
+        // For per-paragraph runs, advance the queue regardless of which
+        // attempt (first or repair) just landed. We only update the cache
+        // on a clean ingest so a malformed paragraph stays dirty.
+        let coach_progress = self.coach_run.as_mut().map(|run| {
+            run.prompt_tokens += prompt_eval;
+            run.eval_tokens += eval;
+            let cache_update = if outcome == IngestOutcome::Done {
+                run.queue
+                    .get(run.current)
+                    .map(|p| (p.id.clone(), p.hash.clone()))
+            } else {
+                None
+            };
+            run.current += 1;
+            let total = run.queue.len();
+            (cache_update, run.current, total)
+        });
+        if let Some((cache_update, advanced_to, total)) = coach_progress {
+            if let Some((id, hash)) = cache_update {
+                self.update_last_run_hash(pipeline, &id, &hash);
+            }
+            if advanced_to < total {
+                self.start_next_paragraph_stream();
+            } else {
+                self.finalize_coach_run(false);
             }
         }
+    }
+
+    /// Persist `hash` as the last-seen value for `(pipeline, paragraph_id)`
+    /// in the chapter's `last_run_hashes`. Per-paragraph runs call this
+    /// after each successful ingest; the next run's dirty-set computation
+    /// then sees the paragraph as cached.
+    fn update_last_run_hash(&mut self, pipeline: Pipeline, paragraph_id: &str, hash: &str) {
+        let Some(ch) = self.current_chapter.as_ref().cloned() else {
+            return;
+        };
+        if ch.folder.is_empty() || ch.name.is_empty() {
+            return;
+        }
+        let label = pipeline.label().to_string();
+        let id = paragraph_id.to_string();
+        let h = hash.to_string();
+        self.update_chapter_meta(&ch.folder, &ch.name, |m| {
+            m.last_run_hashes
+                .entry(label)
+                .or_default()
+                .insert(id, h);
+        });
+    }
+
+    /// Wrap up a per-paragraph run: prune cache entries for paragraphs that
+    /// no longer exist, log the aggregate token totals, surface a summary
+    /// message, and clear `coach_run`. Called whether the run finished
+    /// cleanly or was aborted by a stream error.
+    fn finalize_coach_run(&mut self, aborted: bool) {
+        let Some(run) = self.coach_run.take() else {
+            return;
+        };
+        let label = run.pipeline.label().to_string();
+
+        // Prune cache for paragraphs that have been deleted since cache entries
+        // were last written. Limits to the labels we actually iterate so a
+        // shared paragraph_id between pipelines doesn't get nuked when only
+        // one pipeline ran.
+        let live_ids: std::collections::BTreeSet<String> = self
+            .current_paragraphs
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        if let Some(ch) = self.current_chapter.as_ref().cloned() {
+            if !ch.folder.is_empty() && !ch.name.is_empty() {
+                self.update_chapter_meta(&ch.folder, &ch.name, |m| {
+                    if let Some(map) = m.last_run_hashes.get_mut(&label) {
+                        map.retain(|id, _| live_ids.contains(id));
+                    }
+                });
+            }
+        }
+
+        log::info!(
+            "pipeline={} run done: paragraphs_run={} prompt_tokens={} eval_tokens={} total_tokens={} aborted={aborted}",
+            label,
+            run.current,
+            run.prompt_tokens,
+            run.eval_tokens,
+            run.prompt_tokens + run.eval_tokens,
+        );
     }
 
     fn start_json_repair(&mut self, pipeline: Pipeline, broken: &str) {
@@ -532,6 +774,44 @@ fn paragraph_id_for_offset(byte_offset: usize, paragraphs: &[Paragraph]) -> Opti
         .map(|p| p.id.clone())
 }
 
+/// Walk `paragraphs` in source order and return the ones whose hash differs
+/// from the cached value (or that have no cache entry yet). Each entry
+/// carries the paragraph-local LaTeX→prose translation, snapshotted now so
+/// a mid-run edit can't shift offsets under the streaming loop. Pure
+/// function so the dirty-set logic is testable without spinning up the app.
+pub fn compute_dirty_paragraphs(
+    paragraphs: &[Paragraph],
+    editor_text: &str,
+    cached_hashes: &BTreeMap<String, String>,
+) -> Vec<PendingParagraph> {
+    let mut out = Vec::new();
+    for p in paragraphs {
+        let cache_hit = cached_hashes
+            .get(&p.id)
+            .is_some_and(|h| h == &p.hash);
+        if cache_hit {
+            continue;
+        }
+        let (s, e) = p.char_range;
+        // Defensive: if the live editor_text is shorter than the recorded
+        // range (chapter just changed under us), skip the paragraph rather
+        // than panicking. The next save will refresh `current_paragraphs`.
+        if e > editor_text.len() || s > e {
+            continue;
+        }
+        let prose = latex::to_prose(&editor_text[s..e]);
+        if prose.trim().is_empty() {
+            continue;
+        }
+        out.push(PendingParagraph {
+            id: p.id.clone(),
+            hash: p.hash.clone(),
+            prose,
+        });
+    }
+    out
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -579,9 +859,49 @@ fn preview_for_log(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::compute_dirty_paragraphs;
     use crate::book::dismissals::normalize as normalize_quote;
     use crate::book::paragraphs::parse_and_match;
     use crate::book::suggestions::{auto_stale, id_hash, ChapterSuggestions, Status, SuggestionRecord};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn dirty_set_empty_when_all_hashes_match() {
+        let src = "first paragraph here.\n\nsecond paragraph here.\n";
+        let parsed = parse_and_match(src, &[]);
+        let mut cache = BTreeMap::new();
+        for p in &parsed {
+            cache.insert(p.id.clone(), p.hash.clone());
+        }
+        let dirty = compute_dirty_paragraphs(&parsed, src, &cache);
+        assert!(dirty.is_empty(), "all hashes match, nothing should be dirty");
+    }
+
+    #[test]
+    fn dirty_set_includes_only_changed_paragraph() {
+        let src = "first paragraph here.\n\nsecond paragraph here.\n";
+        let parsed = parse_and_match(src, &[]);
+        // Cache the first paragraph's current hash; leave the second
+        // pointing at a stale value so it shows up dirty.
+        let mut cache = BTreeMap::new();
+        cache.insert(parsed[0].id.clone(), parsed[0].hash.clone());
+        cache.insert(parsed[1].id.clone(), "stale-hash".to_string());
+
+        let dirty = compute_dirty_paragraphs(&parsed, src, &cache);
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].id, parsed[1].id);
+        assert_eq!(dirty[0].hash, parsed[1].hash);
+    }
+
+    #[test]
+    fn dirty_set_includes_paragraphs_with_no_cache_entry() {
+        let src = "first paragraph here.\n\nsecond paragraph here.\n";
+        let parsed = parse_and_match(src, &[]);
+        let cache = BTreeMap::new();
+        let dirty = compute_dirty_paragraphs(&parsed, src, &cache);
+        // Empty cache => every paragraph is dirty (first run for this pipeline).
+        assert_eq!(dirty.len(), parsed.len());
+    }
 
     fn rec(
         id: &str,

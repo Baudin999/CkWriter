@@ -834,7 +834,7 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             ui.add_space(4.0);
         });
 
-    let busy = app.stream.is_some();
+    let busy = app.stream.is_some() || app.coach_run.is_some();
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(
             !busy && app.current_chapter.is_some() && app.ollama_ok,
@@ -855,7 +855,16 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         );
     });
     if busy {
-        ui.label(RichText::new("● running").color(theme::REVISION_VOICE));
+        let status = match &app.coach_run {
+            Some(run) => format!(
+                "● {} paragraph {}/{}",
+                run.pipeline.label(),
+                (run.current + 1).min(run.queue.len()),
+                run.queue.len()
+            ),
+            None => "● running".to_string(),
+        };
+        ui.label(RichText::new(status).color(theme::REVISION_VOICE));
     } else if let Some(err) = &app.last_error {
         ui.label(RichText::new(err).color(Color32::LIGHT_RED));
     } else if app.ollama_ok {
