@@ -80,6 +80,11 @@ pub struct CkWriterApp {
     pub editor_text: String,
     pub dirty: bool,
     pub entity_hits: Vec<EntityHit>,
+    /// blake3-truncated u64 hash of `editor_text` at the moment `entity_hits`
+    /// was last refreshed. Drives the editor's pre-render check that keeps
+    /// hits aligned with the buffer (see #0017): if `Some(h)` matches the
+    /// current text hash, hits are up-to-date; otherwise refresh first.
+    pub last_hits_text_hash: Option<u64>,
     /// Paragraph index for the open chapter, in source order. Recomputed on
     /// chapter open and on save; cleared when no chapter is open. Drives
     /// per-paragraph caching (#0004) and cursor-to-paragraph mapping (#0005).
@@ -231,6 +236,7 @@ impl CkWriterApp {
             editor_text: String::new(),
             dirty: false,
             entity_hits: Vec::new(),
+            last_hits_text_hash: None,
             current_paragraphs: Vec::new(),
             scope_tab: ui::scope_panel::Tab::Characters,
             char_sub_tab: ui::scope_panel::CharSubTab::Cast,

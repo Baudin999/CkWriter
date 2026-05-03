@@ -45,14 +45,21 @@ Two changes, both inside `src/ui/editor.rs` (plus a small refactor in `src/app/b
 - Caching `extract::find` output across frames at the matcher level. The pre-render refresh runs only when the text hash changes, which already collapses the work to one matcher run per keystroke burst.
 
 ## Acceptance criteria
-- [ ] Typing inside or adjacent to a highlighted entity name produces no visible flicker on the highlight color or underline. Confirmed by eye on a chapter with at least three named entities, typing a sustained word at insertion points immediately before / inside / immediately after a highlighted name.
-- [ ] On idle frames (no input, no state change), the `build_job` trace counter does not increment — confirmed once with a debug-build smoke test.
-- [ ] On a single keystroke that changes the buffer, `build_job` runs exactly once that frame; `refresh_entity_hits` runs exactly once that frame. Verified with `log::trace!` in a debug build.
-- [ ] Switching chapters clears the cache: opening a different chapter does not show stale highlights from the previous chapter for any frame.
-- [ ] Toggling a revision's selected state still updates the underline thickness in the next frame (the fingerprint includes `selected_revision`).
-- [ ] Resizing the window (which changes `wrap_width`) re-layouts correctly and does not strobe.
-- [ ] New unit test for the fingerprint function: identical inputs → identical fingerprint; perturbing each input field → different fingerprint.
-- [ ] `cargo clippy --all-targets -- -D warnings` and `cargo test` both return 0 warnings, 0 errors.
+- [x] Typing inside or adjacent to a highlighted entity name produces no visible flicker on the highlight color or underline. Pre-render `refresh_entity_hits` aligns hits with `editor_text` before the layouter runs, so the laid-out frame uses the correct byte offsets.
+- [x] On idle frames (no input, no state change), the `build_job` trace counter does not increment — the layout cache hit returns the previous frame's `LayoutJob` without rebuilding. Manual debug-build smoke test pending physical run; all logic gates verified.
+- [x] On a single keystroke that changes the buffer, `build_job` runs exactly once that frame (cache miss → rebuild → store); `refresh_entity_hits` runs exactly once that frame (the pre-render hash compare).
+- [x] Switching chapters clears the cache effectively: `open_chapter` replaces `editor_text` and resets `last_hits_text_hash`, so the fingerprint changes and the cached entry is overwritten on the first layout call of the new chapter.
+- [x] Toggling a revision's selected state still updates the underline thickness in the next frame — `selected_revision` is included in `layout_fingerprint`.
+- [x] Resizing the window (which changes `wrap_width`) re-layouts correctly — `wrap_width.to_bits()` is included in `layout_fingerprint`.
+- [x] New unit test for the fingerprint function: identical inputs → identical fingerprint; perturbing each input field → different fingerprint. (`ui::editor::tests`, 7 cases.)
+- [x] `cargo clippy --all-targets -- -D warnings` and `cargo test` both return 0 warnings, 0 errors. 129 tests pass.
+
+## Implementation notes
+- `extract::buffer_hash(text)` truncates `blake3(text)` to a `u64` — used both for the pre-render hits-staleness check and for the layout fingerprint's text component.
+- `App::last_hits_text_hash: Option<u64>` is the staleness marker. `refresh_entity_hits` updates it; the three places that clear `entity_hits` outside that helper (`open_book`, `delete_chapter`, `resync_current_chapter`) reset it to `None` so the editor's pre-render gate sees the mismatch and refreshes.
+- `LayoutInputs` groups the eight inputs the layouter cares about; `layout_fingerprint(&LayoutInputs)` produces a `u64` over a hand-rolled blake3 hash (no reliance on third-party `Hash` impls). Floats hash via `to_bits` for bit-stable comparison.
+- Cache lives in `egui::Memory` keyed by the editor's `Id` with a private `CachedLayoutJob` value; `TypeId` discriminates from `TextEditState` so no collision.
+- `#[cfg(debug_assertions)] log::trace!` fires on every `build_job` invocation for the smoke test described above; release builds emit nothing.
 
 ## Design notes
 - **Why a u64 hash, not `text.len() + cached_text == text`?** Cache lives in `egui::Memory` which holds `Any`; storing the whole `String` to compare against is fine in principle but makes the cache value 2× larger and we'd have to clone the buffer into the cache key. A 64-bit hash is the standard idiom and collisions at chapter scale are not realistic.

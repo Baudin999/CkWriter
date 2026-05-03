@@ -96,6 +96,15 @@ pub fn hit_at(hits: &[EntityHit], byte: usize) -> Option<&EntityHit> {
     hits.iter().find(|h| byte >= h.start && byte < h.end)
 }
 
+/// 64-bit truncation of `blake3(text)`. Used as the editor's "is the hits
+/// snapshot still in sync with the buffer?" key (see #0017). Collisions at
+/// chapter scale are not realistic; the bound is `2^-64` per buffer.
+pub fn buffer_hash(text: &str) -> u64 {
+    let h = blake3::hash(text.as_bytes());
+    let bytes = h.as_bytes();
+    u64::from_le_bytes(bytes[..8].try_into().expect("blake3 hash is 32 bytes"))
+}
+
 /// Lightweight candidate proper-noun finder (capitalized word not at sentence start).
 #[allow(dead_code)]
 pub fn candidates(text: &str, known_aliases: &[String]) -> Vec<(usize, usize, String)> {

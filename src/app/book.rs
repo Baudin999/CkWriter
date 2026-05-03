@@ -29,6 +29,7 @@ impl super::CkWriterApp {
         self.current_chapter = None;
         self.editor_text.clear();
         self.entity_hits.clear();
+        self.last_hits_text_hash = None;
         self.current_paragraphs.clear();
         self.revisions.clear();
         self.selected_revision = None;
@@ -248,6 +249,7 @@ impl super::CkWriterApp {
                 self.current_chapter = None;
                 self.editor_text.clear();
                 self.entity_hits.clear();
+                self.last_hits_text_hash = None;
                 self.current_paragraphs.clear();
             }
         }
@@ -330,6 +332,7 @@ impl super::CkWriterApp {
             self.current_chapter = None;
             self.editor_text.clear();
             self.entity_hits.clear();
+            self.last_hits_text_hash = None;
             self.current_paragraphs.clear();
         }
     }
@@ -371,6 +374,11 @@ impl super::CkWriterApp {
             Some(m) => m.find(&self.editor_text),
             None => Vec::new(),
         };
+        // Pair the hits snapshot with the buffer hash they were derived from
+        // so the editor's pre-render gate can detect a stale snapshot in O(1)
+        // (see #0017). Any code path that mutates `entity_hits` *without*
+        // calling this helper must also clear `last_hits_text_hash`.
+        self.last_hits_text_hash = Some(crate::extract::buffer_hash(&self.editor_text));
     }
 
     pub fn run_import(&mut self) {
