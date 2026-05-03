@@ -19,6 +19,18 @@ impl Pipeline {
             Pipeline::Spelling => "spelling",
         }
     }
+
+    /// Reverse of [`Self::label`]; used to rebuild in-memory `Revision`s from
+    /// persisted `SuggestionRecord`s on chapter open.
+    pub fn from_label(s: &str) -> Option<Self> {
+        Some(match s {
+            "voice" => Pipeline::Voice,
+            "show, don't tell" => Pipeline::ShowDontTell,
+            "prose" => Pipeline::Prose,
+            "spelling" => Pipeline::Spelling,
+            _ => return None,
+        })
+    }
 }
 
 pub fn build_system(book: &Book, in_scope: &[&Entity], pipeline: Pipeline) -> String {

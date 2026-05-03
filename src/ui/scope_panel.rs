@@ -798,14 +798,18 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 if ui
                     .checkbox(&mut filter, "filter dismissed")
                     .on_hover_text(
-                        "Hide flags whose quote matches a previously dismissed flag \
-                         on this chapter+pipeline. Dismissals are still recorded \
-                         either way; this only controls whether they're shown.",
+                        "Hide dismissed cards from the panel. Recording is \
+                         unconditional — switch this off in sealing mode to \
+                         reconsider every dismissal (click a dismissed card \
+                         to restore it).",
                     )
                     .changed()
                 {
                     app.settings.coach_filter_dismissed = filter;
                     let _ = app.settings.save();
+                    // Toggle is a panel-visibility filter, not an ingest
+                    // filter — no pipeline needs to run. Rebuild from store.
+                    app.rebuild_revisions_from_store();
                 }
             });
             ui.horizontal(|ui| {
@@ -893,6 +897,7 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     let selected_id = app.selected_revision;
     let mut accept_id: Option<u32> = None;
     let mut dismiss_id: Option<u32> = None;
+    let mut undismiss_id: Option<u32> = None;
     let mut select_id: Option<u32> = None;
     egui::ScrollArea::vertical()
         .id_salt("revisions-scroll")
@@ -916,7 +921,15 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 let selected = selected_id == Some(rev.id);
                 let card_resp = revision_card(ui, rev, color, selected);
                 if card_resp.body_clicked {
-                    select_id = Some(rev.id);
+                    // For dismissed cards in sealing mode, the body click is
+                    // the un-dismiss affordance (matches the "I was wrong to
+                    // dismiss this" mental model). Proposed cards get the
+                    // usual select-and-jump behaviour.
+                    if rev.is_dismissed {
+                        undismiss_id = Some(rev.id);
+                    } else {
+                        select_id = Some(rev.id);
+                    }
                 }
                 if card_resp.apply_clicked {
                     accept_id = Some(rev.id);
@@ -935,6 +948,9 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     if let Some(id) = dismiss_id {
         app.dismiss_revision(id);
     }
+    if let Some(id) = undismiss_id {
+        app.undismiss_revision(id);
+    }
 }
 
 struct RevisionCardEvents {
@@ -949,11 +965,22 @@ fn revision_card(
     color: Color32,
     selected: bool,
 ) -> RevisionCardEvents {
+    // Dismissed cards visible in sealing mode get a dimmed background and a
+    // dedicated pill so the writer can tell them apart from live proposals.
     let bg = if selected {
         theme::REVISION_SELECTED_BG
+    } else if rev.is_dismissed {
+        theme::BG_INSET
     } else {
         Color32::TRANSPARENT
     };
+    let dim = rev.is_dismissed;
+    let body_text_color = if dim {
+        theme::TEXT_MUTED
+    } else {
+        Color32::WHITE
+    };
+    let chip_color = if dim { theme::TEXT_MUTED } else { color };
     let mut body_clicked = false;
     let mut apply_clicked = false;
     let mut dismiss_clicked = false;
@@ -985,7 +1012,15 @@ fn revision_card(
                         } else {
                             rev.kind.label().to_string()
                         };
-                        ui.label(RichText::new(chip_label).color(color).strong());
+                        ui.label(RichText::new(chip_label).color(chip_color).strong());
+                        if rev.is_dismissed {
+                            ui.label(
+                                RichText::new("dismissed")
+                                    .small()
+                                    .color(Color32::BLACK)
+                                    .background_color(theme::TEXT_MUTED),
+                            );
+                        }
                         if rev.anchor.is_none() {
                             ui.label(
                                 RichText::new("(unanchored)")
@@ -1000,39 +1035,54 @@ fn revision_card(
                             .color(theme::TEXT_MUTED),
                     );
                     if !rev.why.is_empty() {
-                        ui.label(&rev.why);
+                        ui.label(RichText::new(&rev.why).color(if dim {
+                            theme::TEXT_MUTED
+                        } else {
+                            theme::TEXT_PRIMARY
+                        }));
                     }
                     if !rev.suggestion.is_empty() {
-                        ui.label(RichText::new(&rev.suggestion).color(Color32::WHITE));
+                        ui.label(RichText::new(&rev.suggestion).color(body_text_color));
                     }
                 });
             let body_resp = body_inner.response.interact(egui::Sense::click());
             body_clicked = body_resp.clicked();
             if body_clicked {
                 log::info!(
-                    "revision card body clicked: id={} pipeline={} kind={:?} anchor={:?}",
+                    "revision card body clicked: id={} pipeline={} kind={:?} anchor={:?} dismissed={}",
                     rev.id,
                     rev.pipeline.label(),
                     rev.kind,
                     rev.anchor,
+                    rev.is_dismissed,
                 );
             }
 
             // Action row lives OUTSIDE the body's click rect, so button
-            // clicks don't double as a "select card" click.
-            ui.horizontal(|ui| {
-                let has_anchor = rev.anchor.is_some();
-                let can_apply = !rev.suggestion.is_empty() && has_anchor;
-                if ui
-                    .add_enabled(can_apply, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    apply_clicked = true;
-                }
-                if ui.button("Dismiss").clicked() {
-                    dismiss_clicked = true;
-                }
-            });
+            // clicks don't double as a "select card" click. Dismissed cards
+            // hide the destructive action (it's already dismissed); body
+            // click handles the un-dismiss.
+            if !rev.is_dismissed {
+                ui.horizontal(|ui| {
+                    let has_anchor = rev.anchor.is_some();
+                    let can_apply = !rev.suggestion.is_empty() && has_anchor;
+                    if ui
+                        .add_enabled(can_apply, egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        apply_clicked = true;
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        dismiss_clicked = true;
+                    }
+                });
+            } else {
+                ui.label(
+                    RichText::new("click to restore")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+            }
         });
     RevisionCardEvents {
         body_clicked,

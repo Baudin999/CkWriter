@@ -6,15 +6,16 @@ pub mod entity;
 pub mod latex;
 pub mod manuscript;
 pub mod paragraphs;
+pub mod suggestions;
 pub mod tree;
 
 use anyhow::{anyhow, Result};
 use chapter_meta::ChapterMeta;
 use data::BookData;
-use dismissals::Dismissals;
 use entity::{Entities, Entity, EntityKind};
 use manuscript::Manuscript;
 use std::path::{Path, PathBuf};
+use suggestions::SuggestionStore;
 use tree::FileNode;
 
 #[derive(Debug, Clone)]
@@ -52,7 +53,10 @@ pub struct Book {
     // see book/data.rs for shape.
     #[allow(dead_code)]
     pub data: BookData,
-    pub dismissals: Dismissals,
+    /// Per-chapter suggestion lifecycle, lazy-loaded from
+    /// `Info/suggestions/<folder>/<name>.json`. Replaces the old
+    /// `coach-dismissals.json` (migrated on first open).
+    pub suggestions: SuggestionStore,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -108,7 +112,14 @@ impl Book {
 
         let entities = Entities::load(root);
         let data = BookData::load(root);
-        let dismissals = Dismissals::load(root);
+
+        // Migrate the legacy `Info/coach-dismissals.json` to the per-chapter
+        // suggestion store. Idempotent — the rename to `.migrated` ensures we
+        // run at most once per book.
+        if let Err(e) = suggestions_migrate::run(root, &chapters_list) {
+            log::warn!("legacy dismissals migration failed: {e}");
+        }
+        let suggestions = SuggestionStore::default();
 
         let voice_prompt =
             std::fs::read_to_string(root.join(&config.voice_prompt_file)).unwrap_or_default();
@@ -127,7 +138,7 @@ impl Book {
             roadmap,
             config,
             data,
-            dismissals,
+            suggestions,
         })
     }
 
@@ -293,6 +304,128 @@ fn load_or_seed_meta(root: &Path, folder: &str, name: &str, tex_path: &Path) -> 
     meta
 }
 
+/// One-shot migrator from `Info/coach-dismissals.json` → per-chapter
+/// suggestion files. Idempotency marker is the rename of the legacy file to
+/// `.migrated`; missing legacy file is also a no-op.
+mod suggestions_migrate {
+    use super::dismissals::{normalize, LEGACY_FILE_NAME};
+    use super::paragraphs::parse_and_match;
+    use super::suggestions::{id_hash, ChapterSuggestions, Status, SuggestionRecord};
+    use super::Chapter;
+    use anyhow::Result;
+    use serde::Deserialize;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+
+    /// Legacy on-disk shape: `chapter_name -> pipeline_label -> set<normalized_quote>`.
+    /// Same as the old `Dismissals::by_chapter`; we keep a private shadow here
+    /// so the active code can drop the `Dismissals` type entirely.
+    #[derive(Debug, Default, Deserialize)]
+    struct Legacy {
+        #[serde(default)]
+        by_chapter: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    }
+
+    pub fn run(root: &Path, chapters: &[Chapter]) -> Result<()> {
+        let legacy_path = root.join(LEGACY_FILE_NAME);
+        if !legacy_path.exists() {
+            return Ok(());
+        }
+        let raw = std::fs::read_to_string(&legacy_path)?;
+        let legacy: Legacy = serde_json::from_str(&raw).unwrap_or_default();
+        let now = now_unix();
+
+        let mut per_chapter: BTreeMap<(String, String), ChapterSuggestions> = BTreeMap::new();
+        for (chapter_name, by_pipeline) in &legacy.by_chapter {
+            // Legacy keyed by stable CamelCase `name`; folder is implicit.
+            // Look it up in the chapter list. If a chapter name appears in
+            // multiple folders (rare; the writer would have to deliberately
+            // duplicate), pick the first match — the old code didn't disambiguate
+            // either, so the legacy data is already ambiguous.
+            let chapter = chapters.iter().find(|c| &c.name == chapter_name);
+            let (folder, name) = match chapter {
+                Some(c) => (c.folder.clone(), c.name.clone()),
+                None => {
+                    log::warn!(
+                        "migrate: chapter {chapter_name:?} not found in book; skipping"
+                    );
+                    continue;
+                }
+            };
+            // Parse paragraphs from the chapter's .tex so we can resolve
+            // paragraph_id for as many quotes as possible. Empty prior is fine
+            // — paragraph ids are deterministic from normalized text + position.
+            let tex_path = chapter.map(|c| c.file_path.clone());
+            let para_index = tex_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|text| (parse_and_match(&text, &[]), text));
+
+            for (pipeline, quotes) in by_pipeline {
+                for q in quotes {
+                    let normalized = normalize(q);
+                    if normalized.is_empty() {
+                        continue;
+                    }
+                    let paragraph_id = match &para_index {
+                        Some((paragraphs, text)) => paragraphs
+                            .iter()
+                            .find(|p| {
+                                let (s, e) = p.char_range;
+                                let body = text.get(s..e).unwrap_or("");
+                                normalize(body).contains(&normalized)
+                            })
+                            .map(|p| p.id.clone()),
+                        None => None,
+                    };
+                    let id = id_hash(pipeline, paragraph_id.as_deref(), &normalized);
+                    let entry = per_chapter
+                        .entry((folder.clone(), name.clone()))
+                        .or_default();
+                    entry.records.entry(id.clone()).or_insert(SuggestionRecord {
+                        id,
+                        pipeline: pipeline.clone(),
+                        kind: String::new(),
+                        paragraph_id,
+                        // Legacy only persisted normalized quotes — that's all
+                        // we have. Re-anchoring on hydrate has to use this as
+                        // the raw quote too.
+                        quote: q.clone(),
+                        normalized_quote: normalized,
+                        why: String::new(),
+                        suggestion: String::new(),
+                        status: Status::Dismissed,
+                        created_at: now,
+                        resolved_at: Some(now),
+                    });
+                }
+            }
+        }
+
+        for ((folder, name), chapter) in &per_chapter {
+            chapter.save(root, folder, name)?;
+        }
+
+        let mut migrated_path = legacy_path.clone();
+        migrated_path.set_extension("json.migrated");
+        std::fs::rename(&legacy_path, &migrated_path)?;
+        log::info!(
+            "migrate: ported {} chapter(s) of legacy dismissals; renamed {} → {}",
+            per_chapter.len(),
+            legacy_path.display(),
+            migrated_path.display(),
+        );
+        Ok(())
+    }
+
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
 /// Read the legacy `<chapter>.notes.md` scratchpad that lived next to the
 /// `.tex` before the metadata sidecar existed. Returns `None` if the file is
 /// missing or empty. The legacy file is left in place — the user keeps a copy
@@ -365,6 +498,78 @@ mod tests {
         std::fs::write(root.join("Modern/010_Awakening.notes.md"), "   \n\t\n").unwrap();
         let meta = load_or_seed_meta(&root, "Modern", "Awakening", &tex_path);
         assert!(meta.plot_notes.is_empty());
+    }
+
+    #[test]
+    fn legacy_dismissals_migrate_into_per_chapter_files() {
+        use crate::book::suggestions::{ChapterSuggestions, Status};
+
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("Modern")).unwrap();
+        // The chapter prose contains the dismissed quote; migrator should bind
+        // a paragraph_id.
+        let tex_path = root.join("Modern/010_Awakening.tex");
+        std::fs::write(
+            &tex_path,
+            "\\chapter{Awakening}\n\nthe dog ran across the open field today.\n",
+        )
+        .unwrap();
+
+        // Legacy file: one chapter, two pipelines, three quotes (one with no
+        // matching paragraph so we exercise the paragraph_id = None path).
+        let legacy = serde_json::json!({
+            "by_chapter": {
+                "Awakening": {
+                    "voice": ["the dog ran across the open field"],
+                    "prose": ["across the open field", "absent quote not in text"],
+                }
+            }
+        });
+        std::fs::create_dir_all(root.join("Info")).unwrap();
+        std::fs::write(
+            root.join("Info/coach-dismissals.json"),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let chapters = vec![Chapter {
+            folder: "Modern".into(),
+            name: "Awakening".into(),
+            include_path: "Modern/010_Awakening".into(),
+            file_path: tex_path.clone(),
+            display_title: "Awakening".into(),
+            in_manuscript: true,
+            meta: ChapterMeta::default(),
+        }];
+        suggestions_migrate::run(&root, &chapters).unwrap();
+
+        // Per-chapter file exists with all three records, all Dismissed.
+        let chapter = ChapterSuggestions::load(&root, "Modern", "Awakening");
+        assert_eq!(chapter.records.len(), 3);
+        for rec in chapter.records.values() {
+            assert_eq!(rec.status, Status::Dismissed);
+            assert!(rec.resolved_at.is_some());
+        }
+        // Two of three resolved a paragraph_id; one (the absent quote) did not.
+        let with_pid = chapter
+            .records
+            .values()
+            .filter(|r| r.paragraph_id.is_some())
+            .count();
+        let without_pid = chapter
+            .records
+            .values()
+            .filter(|r| r.paragraph_id.is_none())
+            .count();
+        assert_eq!(with_pid, 2);
+        assert_eq!(without_pid, 1);
+
+        // Legacy file renamed; idempotent re-run is a no-op.
+        assert!(!root.join("Info/coach-dismissals.json").exists());
+        assert!(root.join("Info/coach-dismissals.json.migrated").exists());
+        suggestions_migrate::run(&root, &chapters).unwrap();
+        let again = ChapterSuggestions::load(&root, "Modern", "Awakening");
+        assert_eq!(again.records.len(), 3);
     }
 
     #[test]

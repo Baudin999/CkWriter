@@ -1,81 +1,10 @@
-//! Coach dismissals — quotes the writer rejected so we can post-filter them
-//! out of future pipeline responses, persisted to
-//! `<book-root>/Info/coach-dismissals.json`.
-//!
-//! Storage shape: `chapter_name -> pipeline_label -> set<normalized_quote>`.
-//! Chapter names are the stable CamelCase identifiers from `manuscript.json`,
-//! not file paths or display titles, so a renumbering or rename of the on-disk
-//! file does not orphan a dismissal list.
-//!
-//! Quotes are normalized (lowercase, whitespace collapsed, trimmed) before
-//! storage and lookup so that minor model variation in quote selection — an
-//! extra space, a different capitalization, a curly vs straight apostrophe —
-//! still matches a previously dismissed flag.
+//! Quote-normalization shared between the legacy `coach-dismissals.json`
+//! migrator and the per-chapter suggestion lifecycle (#0003). Lower-cased,
+//! whitespace-collapsed, trimmed: minor model variation in quote selection
+//! (extra space, capitalization, curly vs straight apostrophe) still matches
+//! a previously-seen quote.
 
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-
-pub const FILE_NAME: &str = "Info/coach-dismissals.json";
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Dismissals {
-    /// chapter name -> pipeline label -> set of normalized quotes
-    #[serde(default)]
-    pub by_chapter: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
-}
-
-pub fn file_path(root: &Path) -> PathBuf {
-    root.join(FILE_NAME)
-}
-
-impl Dismissals {
-    pub fn load(root: &Path) -> Self {
-        let p = file_path(root);
-        match std::fs::read_to_string(&p) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-                log::warn!("coach-dismissals.json parse failed ({e}); using empty");
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
-    }
-
-    pub fn save(&self, root: &Path) -> Result<()> {
-        let p = file_path(root);
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let s = serde_json::to_string_pretty(self)?;
-        std::fs::write(&p, s)?;
-        Ok(())
-    }
-
-    pub fn record(&mut self, chapter_name: &str, pipeline_label: &str, quote: &str) {
-        let n = normalize(quote);
-        if n.is_empty() {
-            return;
-        }
-        self.by_chapter
-            .entry(chapter_name.to_string())
-            .or_default()
-            .entry(pipeline_label.to_string())
-            .or_default()
-            .insert(n);
-    }
-
-    pub fn is_dismissed(&self, chapter_name: &str, pipeline_label: &str, quote: &str) -> bool {
-        let n = normalize(quote);
-        if n.is_empty() {
-            return false;
-        }
-        self.by_chapter
-            .get(chapter_name)
-            .and_then(|by_pipe| by_pipe.get(pipeline_label))
-            .is_some_and(|set| set.contains(&n))
-    }
-}
+pub const LEGACY_FILE_NAME: &str = "Info/coach-dismissals.json";
 
 /// Lowercase, collapse runs of whitespace to a single space, trim. Keeps
 /// punctuation as-is — punctuation differences are usually meaningful to the
@@ -116,24 +45,5 @@ mod tests {
     #[test]
     fn normalize_preserves_punctuation() {
         assert_eq!(normalize("It's, you know."), "it's, you know.");
-    }
-
-    #[test]
-    fn record_and_lookup_roundtrip() {
-        let mut d = Dismissals::default();
-        d.record("Awakening", "prose", "  The dog ran  fast  ");
-        assert!(d.is_dismissed("Awakening", "prose", "the dog ran fast"));
-        assert!(d.is_dismissed("Awakening", "prose", "THE DOG RAN  FAST"));
-        assert!(!d.is_dismissed("Awakening", "prose", "the cat ran fast"));
-        assert!(!d.is_dismissed("Awakening", "voice", "the dog ran fast"));
-        assert!(!d.is_dismissed("OtherChapter", "prose", "the dog ran fast"));
-    }
-
-    #[test]
-    fn empty_quote_is_noop() {
-        let mut d = Dismissals::default();
-        d.record("X", "prose", "   ");
-        assert!(d.by_chapter.is_empty());
-        assert!(!d.is_dismissed("X", "prose", ""));
     }
 }

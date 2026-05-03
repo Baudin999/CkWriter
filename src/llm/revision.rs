@@ -71,6 +71,18 @@ pub struct Revision {
     pub suggestion: String,
     /// (start, end) byte offsets in the editor buffer; `None` if anchoring failed.
     pub anchor: Option<(usize, usize)>,
+    /// Identity hash from the persisted lifecycle store. Used to look up the
+    /// underlying `SuggestionRecord` on accept/dismiss/un-dismiss.
+    pub suggestion_id: String,
+    /// Paragraph this flag anchors into, if the ingest-time anchor landed
+    /// inside a known paragraph. Surfaced to the panel so #0004 (per-paragraph
+    /// caching) and #0005 (locks) can read it without going back to the store.
+    /// Unread today; the field is the contract those tickets hang off of.
+    #[allow(dead_code)]
+    pub paragraph_id: Option<String>,
+    /// Mirrored from `SuggestionRecord::status == Dismissed`. The panel uses
+    /// this to dim the card and swap the action row to a "Restore" affordance.
+    pub is_dismissed: bool,
 }
 
 pub fn parse_voice(buf: &str) -> Option<RawVoice> {

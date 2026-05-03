@@ -127,6 +127,11 @@ impl super::CkWriterApp {
                 self.settings.last_chapter = Some(path.to_path_buf());
                 let _ = self.settings.save();
                 self.seed_chapter_draft();
+                // Rehydrate the panel from the suggestion store BEFORE any
+                // pipeline can run (acceptance criterion). Auto-stale fires
+                // first so dismissed-since-rewrite cards get the right pill.
+                self.run_auto_stale();
+                self.rebuild_revisions_from_store();
             }
             Err(e) => {
                 self.last_error = Some(format!("open failed: {e}"));
