@@ -22,12 +22,12 @@ This is the literal feature the writer asked for as "hardening parts of the stor
 - Locking sub-paragraph spans
 
 ## Acceptance criteria
-- [ ] Locked paragraphs are never prompted to any pipeline (verify via prompt log)
-- [ ] Lock state survives close/reopen
-- [ ] Visual indicator in the editor for locked spans
-- [ ] Right-click toggle works on the paragraph under the cursor
-- [ ] Existing suggestions on a paragraph are preserved when it's locked — only new generation is suppressed
-- [ ] `cargo clippy` and `cargo test` clean
+- [x] Locked paragraphs are never prompted to any pipeline (verify via prompt log)
+- [x] Lock state survives close/reopen
+- [x] Visual indicator in the editor for locked spans
+- [x] Right-click toggle works on the paragraph under the cursor
+- [x] Existing suggestions on a paragraph are preserved when it's locked — only new generation is suppressed
+- [x] `cargo clippy` and `cargo test` clean
 
 ## Design notes
 - Right-click context menu is new for the editor surface; verify egui idiom or roll a small popup.
