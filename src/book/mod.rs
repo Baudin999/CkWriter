@@ -1,5 +1,6 @@
 pub mod chapters;
 pub mod data;
+pub mod dismissals;
 pub mod entity;
 pub mod latex;
 pub mod manuscript;
@@ -7,6 +8,7 @@ pub mod tree;
 
 use anyhow::{anyhow, Result};
 use data::BookData;
+use dismissals::Dismissals;
 use entity::{Entities, Entity, EntityKind};
 use manuscript::Manuscript;
 use std::path::{Path, PathBuf};
@@ -43,6 +45,7 @@ pub struct Book {
     // see book/data.rs for shape.
     #[allow(dead_code)]
     pub data: BookData,
+    pub dismissals: Dismissals,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -98,6 +101,7 @@ impl Book {
 
         let entities = Entities::load(root);
         let data = BookData::load(root);
+        let dismissals = Dismissals::load(root);
 
         let voice_prompt =
             std::fs::read_to_string(root.join(&config.voice_prompt_file)).unwrap_or_default();
@@ -116,6 +120,7 @@ impl Book {
             roadmap,
             config,
             data,
+            dismissals,
         })
     }
 

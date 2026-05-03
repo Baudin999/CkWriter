@@ -109,7 +109,8 @@ Rules:
 - "quote" MUST be an exact substring.
 - Maximum 6 flags. Highest-impact only.
 - Suggestions favor concrete sensory or behavioral detail (smell, sound, gesture, weight, temperature, taste, posture).
-- Skip anything that is already showing."#;
+- Skip anything that is already showing.
+- If the prose is already showing well, return {"flags": []}. Do not invent problems to fill the list. Zero flags is a valid, expected answer when the prose is strong."#;
 
 const PROSE_INSTRUCTIONS: &str = r#"You are a prose-mechanics editor. Critique sentence rhythm, dead verbs, redundancy, adjective pile-ups, and filler hedges in the prose below.
 
@@ -124,7 +125,8 @@ Return STRICT JSON in this exact shape and NOTHING else — no preface, no comme
 Rules:
 - "quote" MUST be an exact substring of the prose, copyable verbatim.
 - Maximum 8 flags. Prefer surgical cuts over rewrites.
-- If you have nothing to flag, return {"flags": []}."#;
+- Only flag genuine mechanical problems. Do not invent issues to fill the list, and do not flag stylistic choices that are working.
+- If the prose is already clean, return {"flags": []}. Zero flags is a valid, expected answer."#;
 
 const SPELLING_INSTRUCTIONS: &str = r#"You are a copy editor for US English. Find spelling, punctuation, and grammar mistakes in the prose below.
 

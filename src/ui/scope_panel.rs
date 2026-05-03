@@ -786,6 +786,50 @@ fn location_row(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str, count: Optio
 fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     use crate::llm::prompts::Pipeline;
 
+    // Bottom strip: temperature slider for the coaching pipelines. Anchored
+    // to the bottom so the revision-cards scroll area above keeps consuming
+    // all remaining vertical space.
+    egui::TopBottomPanel::bottom("ai-temperature-strip")
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let mut filter = app.settings.coach_filter_dismissed;
+                if ui
+                    .checkbox(&mut filter, "filter dismissed")
+                    .on_hover_text(
+                        "Hide flags whose quote matches a previously dismissed flag \
+                         on this chapter+pipeline. Dismissals are still recorded \
+                         either way; this only controls whether they're shown.",
+                    )
+                    .changed()
+                {
+                    app.settings.coach_filter_dismissed = filter;
+                    let _ = app.settings.save();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("temperature")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                let mut temp = app.settings.coach_temperature;
+                let resp = ui.add(
+                    egui::Slider::new(&mut temp, 0.0..=1.0)
+                        .step_by(0.1)
+                        .fixed_decimals(1),
+                );
+                if resp.changed() {
+                    // Snap to the nearest 0.1 so toml round-trips don't drift
+                    // the value by float noise (e.g. 0.30000000000000004).
+                    app.settings.coach_temperature = (temp * 10.0).round() / 10.0;
+                    let _ = app.settings.save();
+                }
+            });
+            ui.add_space(4.0);
+        });
+
     let busy = app.stream.is_some();
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(

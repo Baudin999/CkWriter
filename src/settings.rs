@@ -37,6 +37,15 @@ pub struct Settings {
     /// For each chapter file, where the cursor was and how far the editor was scrolled.
     #[serde(default)]
     pub chapter_places: HashMap<PathBuf, ChapterPlace>,
+    /// Sampling temperature for the coaching pipelines (voice/show/prose/spelling).
+    /// Lower values reduce invented flags; the slider snaps to 0.1 increments.
+    #[serde(default = "default_coach_temperature")]
+    pub coach_temperature: f32,
+    /// When true, post-filter coach responses against the per-chapter dismissals
+    /// list so previously rejected quotes don't reappear. The model still sees
+    /// and "thinks about" those passages — this is a presentation filter only.
+    #[serde(default = "default_coach_filter_dismissed")]
+    pub coach_filter_dismissed: bool,
 }
 
 fn default_model() -> String {
@@ -54,6 +63,12 @@ fn default_left_panel_width() -> f32 {
 fn default_right_panel_width() -> f32 {
     600.0
 }
+fn default_coach_temperature() -> f32 {
+    0.2
+}
+fn default_coach_filter_dismissed() -> bool {
+    true
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -68,6 +83,8 @@ impl Default for Settings {
             last_chapter: None,
             expanded_dirs: HashMap::new(),
             chapter_places: HashMap::new(),
+            coach_temperature: default_coach_temperature(),
+            coach_filter_dismissed: default_coach_filter_dismissed(),
         }
     }
 }

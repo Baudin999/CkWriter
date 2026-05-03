@@ -40,9 +40,10 @@ impl super::CkWriterApp {
         ];
         // Full-chapter prose can run 40-90KB; 32k tokens fits the system
         // prompt + chapter without truncation. Output cap covers up to ~8
-        // flags' worth of quote/why/suggestion strings.
+        // flags' worth of quote/why/suggestion strings. Temperature is
+        // user-tunable from the AI panel — lower values reduce invented flags.
         let tuning = llm::ChatTuning {
-            temperature: 0.4,
+            temperature: self.settings.coach_temperature,
             num_ctx: 32_768,
             num_predict: 2_048,
         };
@@ -176,9 +177,27 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
         let raw_count = flags.len();
         let mut added = 0usize;
         let mut anchored = 0usize;
+        let mut filtered = 0usize;
+        let chapter_name = self.current_chapter.as_ref().map(|c| c.name.clone());
+        let filter_active = self.settings.coach_filter_dismissed;
+        let pipeline_label = pipeline.label();
         for f in flags {
             if f.quote.trim().is_empty() {
                 continue;
+            }
+            // Post-filter: drop flags whose normalized quote matches a previously
+            // dismissed flag on this chapter+pipeline. The model still produced
+            // them — we just don't surface them to the writer.
+            if filter_active {
+                let suppressed = chapter_name.as_deref().is_some_and(|name| {
+                    self.book.as_ref().is_some_and(|b| {
+                        b.dismissals.is_dismissed(name, pipeline_label, &f.quote)
+                    })
+                });
+                if suppressed {
+                    filtered += 1;
+                    continue;
+                }
             }
             // Try anchoring against the original LaTeX text first; fall back to
             // anchor in the prose-stripped string and translate by string search.
@@ -217,7 +236,7 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
         self.revisions
             .sort_by_key(|r| r.anchor.map(|(s, _)| s).unwrap_or(usize::MAX));
         log::info!(
-            "pipeline={} ingested: parsed_ok={parsed_ok} raw_flags={raw_count} added={added} anchored={anchored} response_bytes={}",
+            "pipeline={} ingested: parsed_ok={parsed_ok} raw_flags={raw_count} added={added} anchored={anchored} filtered={filtered} response_bytes={}",
             pipeline.label(),
             buffer.len(),
         );
@@ -225,6 +244,11 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
             let msg = if !parsed_ok {
                 format!(
                     "{}: JSON parse failed — model likely returned prose, not JSON (see log)",
+                    pipeline.label()
+                )
+            } else if filtered > 0 {
+                format!(
+                    "{}: {filtered} flag(s) filtered as previously dismissed",
                     pipeline.label()
                 )
             } else {
@@ -276,9 +300,27 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
     }
 
     pub fn dismiss_revision(&mut self, id: u32) {
+        let rev_info = self
+            .revisions
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (r.pipeline, r.quote.clone()));
         self.revisions.retain(|r| r.id != id);
         if self.selected_revision == Some(id) {
             self.selected_revision = None;
+        }
+        // Persist the dismissal so the same quote doesn't reappear next run.
+        // Filtering at ingest time is gated on the user's toggle, but recording
+        // is unconditional — a dismissal is durable intent.
+        if let Some((pipeline, quote)) = rev_info {
+            let chapter_name = self.current_chapter.as_ref().map(|c| c.name.clone());
+            if let (Some(name), Some(book)) = (chapter_name, self.book.as_mut()) {
+                let root = book.root.clone();
+                book.dismissals.record(&name, pipeline.label(), &quote);
+                if let Err(e) = book.dismissals.save(&root) {
+                    log::warn!("dismissals save failed: {e}");
+                }
+            }
         }
     }
 
