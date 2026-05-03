@@ -52,6 +52,7 @@ impl super::CkWriterApp {
         self.chat_pending_assistant.clear();
         self.chat_error = None;
         self.chat_chapter = None;
+        self.paragraph_play_queue.clear();
         self.rebuild_char_index();
         self.settings.touch_recent(root);
         if let Some(model) = self.book.as_ref().and_then(|b| b.config.model.clone()) {
@@ -83,6 +84,7 @@ impl super::CkWriterApp {
                 self.dirty = false;
                 if chapter_changed {
                     self.reset_chat();
+                    self.paragraph_play_queue.clear();
                 }
                 if let Some(place) = self.settings.chapter_places.get(path) {
                     self.pending_cursor_char = Some(place.cursor);

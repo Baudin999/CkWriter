@@ -13,7 +13,7 @@ use crate::theme;
 use crate::ui;
 use crate::ui::forms::Form;
 use eframe::App;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -117,6 +117,12 @@ pub struct CkWriterApp {
     /// run paragraph-by-paragraph (#0004). `None` when no per-paragraph run
     /// is active. Voice still runs chapter-level and bypasses this.
     pub coach_run: Option<coach::CoachRun>,
+    /// Queue of (paragraph_id, pipeline) pairs staged by the per-paragraph
+    /// play button (#0024). Each click pushes show/prose/spelling for the
+    /// clicked paragraph; entries drain sequentially after each
+    /// `finalize_coach_run`. Cleared on chapter switch and book close so a
+    /// stale paragraph_id never fires against the wrong chapter.
+    pub paragraph_play_queue: VecDeque<(String, Pipeline)>,
     pub revisions: Vec<Revision>,
     pub next_rev_id: u32,
     /// Which revision card the writer last clicked. Drives the editor jump,
@@ -265,6 +271,7 @@ impl CkWriterApp {
             stream_is_repair: false,
             last_stream_buffer: None,
             coach_run: None,
+            paragraph_play_queue: VecDeque::new(),
             revisions: Vec::new(),
             next_rev_id: 1,
             selected_revision: None,

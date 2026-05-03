@@ -20,3 +20,4 @@ pub const CIRCLE_O: &str = "\u{f10c}";
 pub const EXCHANGE: &str = "\u{f0ec}";
 pub const BARS: &str = "\u{f0c9}";
 pub const TRASH: &str = "\u{f1f8}";
+pub const PLAY: &str = "\u{f04b}";

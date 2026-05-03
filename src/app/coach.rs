@@ -108,6 +108,139 @@ impl super::CkWriterApp {
         self.last_error = None;
     }
 
+    /// Per-paragraph play button (#0024): queue show / prose / spelling for
+    /// the named paragraph and kick the queue drain. Always force-runs even
+    /// if every pipeline's cache hash matches — the click is an explicit
+    /// re-run, and idempotency is preserved by the existing `id_hash`
+    /// dedupe in `ingest_response`.
+    pub fn play_paragraph(&mut self, paragraph_id: &str) {
+        if self.book.is_none() {
+            return;
+        }
+        // Validate the paragraph exists in the live index. Stale clicks (from
+        // a paragraph that was edited away mid-frame) silently no-op.
+        if !self
+            .current_paragraphs
+            .iter()
+            .any(|p| p.id == paragraph_id)
+        {
+            log::warn!(
+                "play_paragraph: paragraph_id={paragraph_id:?} not in current_paragraphs; ignoring"
+            );
+            return;
+        }
+        for pipeline in [
+            Pipeline::ShowDontTell,
+            Pipeline::Prose,
+            Pipeline::Spelling,
+        ] {
+            self.paragraph_play_queue
+                .push_back((paragraph_id.to_string(), pipeline));
+        }
+        self.try_drain_paragraph_play_queue();
+    }
+
+    /// If nothing is in flight, pop the next queued (paragraph_id, pipeline)
+    /// and start it. Called from `play_paragraph` (initial kick) and from
+    /// `finalize_coach_run` (after each per-paragraph run completes).
+    fn try_drain_paragraph_play_queue(&mut self) {
+        if self.stream.is_some() || self.coach_run.is_some() {
+            return;
+        }
+        while let Some((paragraph_id, pipeline)) = self.paragraph_play_queue.pop_front() {
+            // The paragraph may have disappeared between queueing and
+            // draining (writer rewrote the paragraph aggressively); skip
+            // and try the next entry rather than tripping on a stale id.
+            if !self
+                .current_paragraphs
+                .iter()
+                .any(|p| p.id == paragraph_id)
+            {
+                log::info!(
+                    "play queue: skipping stale paragraph_id={paragraph_id:?} pipeline={}",
+                    pipeline.label()
+                );
+                continue;
+            }
+            self.start_single_paragraph_run(&paragraph_id, pipeline);
+            return;
+        }
+    }
+
+    /// Force-run `pipeline` against a single paragraph, bypassing the
+    /// per-pipeline dirty-hash cache. Used by the per-paragraph play button
+    /// (#0024). Caller guarantees no other stream is in flight.
+    fn start_single_paragraph_run(&mut self, paragraph_id: &str, pipeline: Pipeline) {
+        let Some(book) = self.book.as_ref() else { return };
+        let Some(paragraph) = self
+            .current_paragraphs
+            .iter()
+            .find(|p| p.id == paragraph_id)
+            .cloned()
+        else {
+            return;
+        };
+        let (s, e) = paragraph.char_range;
+        if e > self.editor_text.len() || s > e {
+            return;
+        }
+        let prose = crate::book::latex::to_prose(&self.editor_text[s..e]);
+        if prose.trim().is_empty() {
+            return;
+        }
+        let chapter_label = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.display_title.as_str())
+            .unwrap_or("<no chapter>");
+        log::info!(
+            "play_paragraph: pipeline={} chapter={chapter_label:?} paragraph_id={} prose_chars={} (force, queued={})",
+            pipeline.label(),
+            paragraph.id,
+            prose.chars().count(),
+            self.paragraph_play_queue.len(),
+        );
+        self.coach_run = Some(CoachRun {
+            pipeline,
+            queue: vec![PendingParagraph {
+                id: paragraph.id.clone(),
+                hash: paragraph.hash.clone(),
+                prose,
+            }],
+            current: 0,
+            prompt_tokens: 0,
+            eval_tokens: 0,
+        });
+        // Mirror the prompt build from `start_next_paragraph_stream` —
+        // can't call it directly because `coach_run` was just assigned and
+        // we need the `book` borrow in the same statement. The system /
+        // user / tuning shape are identical to a normal per-paragraph run.
+        let in_scope = scope::voice_context_entities(book, &self.entity_hits);
+        let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
+        let user = crate::llm::prompts::build_user(
+            &self.coach_run.as_ref().expect("just set").queue[0].prose,
+        );
+        let messages = vec![
+            llm::ChatMessage::system(system),
+            llm::ChatMessage::user(user),
+        ];
+        let tuning = llm::ChatTuning {
+            temperature: self.settings.coach_temperature,
+            num_ctx: 8_192,
+            num_predict: 2_048,
+        };
+        let handle = llm::chat_stream(
+            &self.settings.ollama_url,
+            &self.settings.model,
+            messages,
+            true,
+            tuning,
+        );
+        self.stream = Some(handle);
+        self.stream_pipeline = Some(pipeline);
+        self.last_error = None;
+    }
+
     fn start_paragraph_run(&mut self, pipeline: Pipeline) {
         let label = pipeline.label().to_string();
         let cached = self
@@ -225,6 +358,16 @@ impl super::CkWriterApp {
             if self.coach_run.is_some() {
                 self.finalize_coach_run(true);
             }
+            // Drop the rest of the play queue too — cascading failures
+            // against a broken model would just spam the same error per
+            // queued pipeline.
+            if !self.paragraph_play_queue.is_empty() {
+                log::info!(
+                    "play queue: stream errored, dropping {} pending entr(ies)",
+                    self.paragraph_play_queue.len()
+                );
+                self.paragraph_play_queue.clear();
+            }
             return;
         }
 
@@ -277,6 +420,9 @@ impl super::CkWriterApp {
                 self.start_next_paragraph_stream();
             } else {
                 self.finalize_coach_run(false);
+                // Per-paragraph play button (#0024): if this just finished
+                // entry N of a queued chain, kick off entry N+1.
+                self.try_drain_paragraph_play_queue();
             }
         }
     }
