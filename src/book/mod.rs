@@ -397,6 +397,7 @@ mod suggestions_migrate {
                         status: Status::Dismissed,
                         created_at: now,
                         resolved_at: Some(now),
+                        dismissal_note: None,
                     });
                 }
             }

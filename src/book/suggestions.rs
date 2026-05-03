@@ -49,6 +49,16 @@ pub struct SuggestionRecord {
     pub created_at: i64,
     #[serde(default)]
     pub resolved_at: Option<i64>,
+    /// Writer-supplied rationale for dismissing this flag (#0027). Threaded
+    /// into the AI prompt's "Already reviewed" section so the model sees the
+    /// reasoning, not just the quote — lets it generalize across paraphrases
+    /// the string-similarity dedup can't catch.
+    ///
+    /// `None` for non-Dismissed records and for Dismissed records the writer
+    /// hasn't annotated yet. Empty `Some("")` collapses to "no note rendered"
+    /// the same as `None` at prompt-build time.
+    #[serde(default)]
+    pub dismissal_note: Option<String>,
 }
 
 /// On-disk file for a single chapter's lifecycle records.
@@ -316,6 +326,7 @@ mod tests {
             status,
             created_at: 1_700_000_000,
             resolved_at: None,
+            dismissal_note: None,
         }
     }
 
@@ -376,6 +387,53 @@ mod tests {
         let dir = tempdir();
         let c = ChapterSuggestions::load(&dir, "Modern", "Nope");
         assert!(c.records.is_empty());
+    }
+
+    #[test]
+    fn dismissal_note_round_trips_through_chapter_store() {
+        // #0027: writer-supplied rationale for a dismissed flag must survive
+        // save → load. Records without a note (legacy data + freshly proposed
+        // flags) must deserialize as `None`, not error.
+        let dir = tempdir();
+        let mut c = ChapterSuggestions::default();
+        let mut annotated = make_record("h1", Some("p_aaaaaaaa"), "really tired", Status::Dismissed);
+        annotated.dismissal_note =
+            Some("colloquial register is intentional for this character".to_string());
+        c.records.insert(annotated.id.clone(), annotated);
+        let plain = make_record("h2", Some("p_aaaaaaaa"), "the cat sat", Status::Proposed);
+        c.records.insert(plain.id.clone(), plain);
+        c.save(&dir, "Modern", "WithNotes").unwrap();
+
+        let loaded = ChapterSuggestions::load(&dir, "Modern", "WithNotes");
+        let by_id: BTreeMap<String, SuggestionRecord> = loaded
+            .records
+            .values()
+            .map(|r| (r.id.clone(), r.clone()))
+            .collect();
+        assert_eq!(
+            by_id.get("h1").and_then(|r| r.dismissal_note.clone()),
+            Some("colloquial register is intentional for this character".to_string()),
+        );
+        assert_eq!(by_id.get("h2").and_then(|r| r.dismissal_note.clone()), None);
+    }
+
+    #[test]
+    fn legacy_record_without_dismissal_note_field_loads_none() {
+        // Sidecars written before #0027 have no `dismissal_note` field on
+        // their records. serde(default) must turn that into `None`, not an
+        // unknown-field error or a parse failure.
+        let dir = tempdir();
+        let p = file_path(&dir, "Modern", "Legacy");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"h1":{"id":"h1","pipeline":"prose","quote":"q","normalized_quote":"q","status":"dismissed","created_at":1}}"#,
+        )
+        .unwrap();
+        let loaded = ChapterSuggestions::load(&dir, "Modern", "Legacy");
+        assert_eq!(loaded.records.len(), 1);
+        let rec = loaded.records.values().next().unwrap();
+        assert_eq!(rec.dismissal_note, None);
     }
 
     #[test]
@@ -477,6 +535,7 @@ mod tests {
             status,
             created_at: 1,
             resolved_at: None,
+            dismissal_note: None,
         }
     }
 

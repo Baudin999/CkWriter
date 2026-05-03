@@ -54,6 +54,17 @@ pub struct ChapterMeta {
     /// Voice runs chapter-level and does not populate this map.
     #[serde(default)]
     pub last_run_hashes: BTreeMap<String, BTreeMap<String, String>>,
+    /// Per-paragraph author notes (#0027), keyed by `Paragraph::id`. The
+    /// writer's stated intent for that paragraph — fed into the AI prompt
+    /// as `## Author guidance for this paragraph` so the model stops
+    /// flagging prose that's deliberate. Empty / missing string for a
+    /// paragraph collapses to "no guidance" at prompt-build time.
+    ///
+    /// Notes orphan if the paragraph's id rotates (a content edit large
+    /// enough to defeat Jaccard 0.5 in the matcher). v1 trade-off; rebind
+    /// is a follow-up if it bites.
+    #[serde(default)]
+    pub paragraph_notes: BTreeMap<String, String>,
 }
 
 pub fn file_path(root: &Path, folder: &str, name: &str) -> PathBuf {
@@ -118,6 +129,12 @@ mod tests {
         let mut last_run_hashes = BTreeMap::new();
         last_run_hashes.insert("prose".to_string(), prose_cache);
 
+        let mut paragraph_notes = BTreeMap::new();
+        paragraph_notes.insert(
+            "p_12345678".into(),
+            "this paragraph is supposed to read flat".into(),
+        );
+
         let meta = ChapterMeta {
             summary: "Hero arrives in town.".into(),
             goals: "Establish stakes.".into(),
@@ -138,10 +155,29 @@ mod tests {
                 },
             ],
             last_run_hashes,
+            paragraph_notes,
         };
         save(&dir, "Modern", "Awakening", &meta).expect("save");
         let loaded = load(&dir, "Modern", "Awakening");
         assert_eq!(loaded, meta);
+    }
+
+    #[test]
+    fn legacy_meta_without_paragraph_notes_loads_empty_map() {
+        // Sidecars written before #0027 have no `paragraph_notes` field.
+        // serde(default) must turn that into an empty map, not a parse
+        // error or a missing-field complaint.
+        let dir = tempdir();
+        let p = file_path(&dir, "Modern", "PreNotes");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"summary": "carryover", "paragraphs": [{"id": "p_aaaaaaaa", "hash": "abc"}]}"#,
+        )
+        .unwrap();
+        let meta = load(&dir, "Modern", "PreNotes");
+        assert_eq!(meta.summary, "carryover");
+        assert!(meta.paragraph_notes.is_empty());
     }
 
     #[test]

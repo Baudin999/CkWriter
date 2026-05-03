@@ -175,28 +175,62 @@ Rules:
 - If there are no mistakes, return {"flags": []}."#;
 
 pub fn build_user(prose: &str) -> String {
-    build_user_with_history(prose, &[])
+    build_user_with_history(prose, None, &[])
 }
 
-/// Like [`build_user`] but with a "Already reviewed — do not flag again"
-/// section listing prior Dismissed / Accepted quotes for the same
-/// `(pipeline, paragraph_id)`. Used by per-paragraph runs (#0025) so the
-/// model stops re-raising deliberate stylistic choices and addressed
-/// edits on every play-button run. Empty `history` collapses to the
-/// plain `build_user` output, so chapter-level callers stay byte-identical.
-pub fn build_user_with_history(prose: &str, history: &[&str]) -> String {
+/// One entry in the "Already reviewed — do not flag again" prompt section
+/// (#0025 + #0027). `quote` is the text the model previously flagged;
+/// `dismissal_note` (when present) is the writer's stated reason for
+/// dismissing it, threaded back so the model sees the rationale and can
+/// generalize across paraphrases. `None` collapses to "no note rendered".
+pub type HistoryEntry<'a> = (&'a str, Option<&'a str>);
+
+/// Like [`build_user`] but with two writer-facing context sections threaded
+/// into the prompt:
+///
+/// - `paragraph_note` (#0027) — the writer's intent for this paragraph,
+///   rendered above everything else as `## Author guidance for this
+///   paragraph`. The model is asked to treat it as deliberate intent and
+///   avoid flagging prose consistent with it.
+/// - `history` (#0025 + #0027) — prior Dismissed / Accepted quotes plus
+///   their optional dismissal notes, rendered as the "Already reviewed —
+///   do not flag again" section so dismissals don't get re-raised on
+///   every per-paragraph play-button click.
+///
+/// Empty `paragraph_note` (`None` or `""`) and empty `history` together
+/// collapse to byte-identical output with the legacy `build_user` so
+/// chapter-level callers (which carry no per-paragraph context) stay
+/// unchanged.
+pub fn build_user_with_history(
+    prose: &str,
+    paragraph_note: Option<&str>,
+    history: &[HistoryEntry<'_>],
+) -> String {
     let mut s = String::new();
+    if let Some(note) = paragraph_note {
+        let trimmed = note.trim();
+        if !trimmed.is_empty() {
+            s.push_str("## Author guidance for this paragraph\n\n");
+            s.push_str(trimmed);
+            s.push_str(
+                "\n\nTreat the guidance above as the author's stated intent for this \
+                 paragraph; do NOT flag prose that is consistent with it.\n\n---\n\n",
+            );
+        }
+    }
     if !history.is_empty() {
         s.push_str("## Already reviewed — do not flag again\n\n");
         s.push_str(
             "The author has already seen and resolved these quotes from the prose below. \
-             Treat them as deliberate or already addressed; do NOT include them in `flags`.\n\n",
+             Treat them as deliberate or already addressed; do NOT include them in `flags`. \
+             Where a dismissal reason is given, treat it as authoritative — apply the same \
+             reasoning to paraphrases of the same complaint.\n\n",
         );
-        for q in history {
+        for (quote, note) in history {
             // One line per quote; truncate aggressively-long quotes so the
             // section can't dominate the prompt budget. The model only needs
             // enough text to recognize the same observation.
-            let trimmed = q.trim();
+            let trimmed = quote.trim();
             if trimmed.is_empty() {
                 continue;
             }
@@ -205,6 +239,16 @@ pub fn build_user_with_history(prose: &str, history: &[&str]) -> String {
             s.push_str(&preview);
             if trimmed.chars().count() > 240 {
                 s.push('…');
+            }
+            // Append the writer's dismissal note when present and non-empty,
+            // matching the "<quote> — dismissed because: <note>" shape from
+            // the #0027 ticket.
+            if let Some(note_text) = note {
+                let note_trimmed = note_text.trim();
+                if !note_trimmed.is_empty() {
+                    s.push_str(" — dismissed because: ");
+                    s.push_str(note_trimmed);
+                }
             }
             s.push('\n');
         }
@@ -217,4 +261,94 @@ pub fn build_user_with_history(prose: &str, history: &[&str]) -> String {
     }
     s.push_str("```\n\nReturn the JSON object now. JSON only.\n");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_no_history_no_note_matches_build_user() {
+        // build_user(prose) is build_user_with_history(prose, None, &[]) by
+        // construction; the byte-for-byte equivalence is the contract that
+        // chapter-level callers rely on. Pin it here so we notice if either
+        // function drifts.
+        let prose = "the dog ran fast across the open field hunting rabbits.";
+        let baseline = build_user(prose);
+        let through_history = build_user_with_history(prose, None, &[]);
+        assert_eq!(baseline, through_history);
+    }
+
+    #[test]
+    fn paragraph_note_renders_above_already_reviewed() {
+        // Non-empty note must appear in its own section, ABOVE the existing
+        // "Already reviewed" block — paragraph guidance is prospective; the
+        // dismissal list is reactive, and the model should read intent
+        // before it reads corrections.
+        let out = build_user_with_history(
+            "prose here.",
+            Some("this paragraph is supposed to read flat"),
+            &[("the cat sat", None)],
+        );
+        let note_idx = out
+            .find("## Author guidance for this paragraph")
+            .expect("note section present");
+        let history_idx = out
+            .find("## Already reviewed — do not flag again")
+            .expect("history section present");
+        assert!(
+            note_idx < history_idx,
+            "author-guidance section must precede already-reviewed: note={note_idx} history={history_idx}",
+        );
+        assert!(out.contains("this paragraph is supposed to read flat"));
+    }
+
+    #[test]
+    fn empty_paragraph_note_collapses_to_no_section() {
+        // An empty (or whitespace-only) note must not render an empty
+        // section — that would waste prompt budget and look like an
+        // incomplete instruction to the model.
+        let out_none = build_user_with_history("prose.", None, &[]);
+        let out_empty = build_user_with_history("prose.", Some(""), &[]);
+        let out_blank = build_user_with_history("prose.", Some("   \n\t"), &[]);
+        assert_eq!(out_none, out_empty);
+        assert_eq!(out_none, out_blank);
+        assert!(!out_none.contains("Author guidance"));
+    }
+
+    #[test]
+    fn dismissal_note_renders_alongside_quote() {
+        // History entry with a note → "<quote> — dismissed because: <note>".
+        // Entry without a note → bare "<quote>". Both shapes must be present
+        // when both kinds of records share the section.
+        let out = build_user_with_history(
+            "prose.",
+            None,
+            &[
+                ("really tired", Some("colloquial register is intentional")),
+                ("the cat sat", None),
+            ],
+        );
+        assert!(
+            out.contains("- really tired — dismissed because: colloquial register is intentional"),
+            "annotated entry missing or malformed in:\n{out}",
+        );
+        assert!(
+            out.contains("- the cat sat\n"),
+            "plain entry missing or malformed in:\n{out}",
+        );
+    }
+
+    #[test]
+    fn empty_dismissal_note_collapses_to_bare_quote() {
+        // A note that's `Some("")` or all-whitespace must render the same as
+        // `None` — the writer has *registered* the record but not annotated
+        // it; we don't want a trailing dangling em-dash in the prompt.
+        let out_none = build_user_with_history("prose.", None, &[("the cat sat", None)]);
+        let out_empty = build_user_with_history("prose.", None, &[("the cat sat", Some(""))]);
+        let out_blank = build_user_with_history("prose.", None, &[("the cat sat", Some("  "))]);
+        assert_eq!(out_none, out_empty);
+        assert_eq!(out_none, out_blank);
+        assert!(!out_none.contains("dismissed because"));
+    }
 }

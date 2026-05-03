@@ -108,19 +108,21 @@ impl super::CkWriterApp {
         self.last_error = None;
     }
 
-    /// Collect raw quotes for non-Stale records (Dismissed + Accepted +
-    /// existing Proposed) matching `(pipeline, paragraph_id)` in the active
-    /// chapter's store. Used by per-paragraph runs (#0025) to feed the model
-    /// an "already reviewed — do not flag again" section, closing the loop
-    /// so dismissals don't get re-raised on every play-button click.
+    /// Collect (quote, optional dismissal note) pairs for non-Stale records
+    /// (Dismissed + Accepted + existing Proposed) matching `(pipeline,
+    /// paragraph_id)` in the active chapter's store. Used by per-paragraph
+    /// runs (#0025 + #0027) to feed the model an "already reviewed — do not
+    /// flag again" section so dismissals don't get re-raised on every
+    /// play-button click, and so the writer's stated dismissal reason is
+    /// fed back to the model for paraphrase generalization.
     ///
     /// Stale skipped: those are auto-swept tombstones for paragraphs the
     /// writer rewrote — they're not deliberate "don't flag" intent.
-    fn already_reviewed_quotes(
+    fn already_reviewed_history(
         &self,
         pipeline: Pipeline,
         paragraph_id: &str,
-    ) -> Vec<String> {
+    ) -> Vec<(String, Option<String>)> {
         let Some(ch) = self.current_chapter.as_ref() else {
             return Vec::new();
         };
@@ -134,19 +136,34 @@ impl super::CkWriterApp {
             return Vec::new();
         };
         let pipeline_label = pipeline.label();
-        let mut out: Vec<String> = chapter_store
+        let mut out: Vec<(String, Option<String>)> = chapter_store
             .records
             .values()
             .filter(|r| r.status != Status::Stale)
             .filter(|r| r.pipeline == pipeline_label)
             .filter(|r| r.paragraph_id.as_deref() == Some(paragraph_id))
-            .map(|r| r.quote.clone())
+            .map(|r| (r.quote.clone(), r.dismissal_note.clone()))
             .collect();
-        // Sort + dedupe (a fuzzy match can leave near-duplicate quotes;
-        // exact-text duplicates are noise in the prompt).
-        out.sort();
-        out.dedup();
+        // Sort + dedupe by quote (a fuzzy match can leave near-duplicate
+        // quotes; exact-text duplicates are noise in the prompt). When two
+        // records share a quote, keep whichever note is `Some` first.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.dedup_by(|a, b| a.0 == b.0);
         out
+    }
+
+    /// Pull the writer's per-paragraph guidance note (#0027) from the
+    /// current chapter's metadata. `None` if no chapter is open or the
+    /// paragraph carries no note. Empty-string notes return `None` so the
+    /// prompt builder doesn't waste budget rendering an empty section.
+    fn paragraph_note_for(&self, paragraph_id: &str) -> Option<String> {
+        let ch = self.current_chapter.as_ref()?;
+        let note = ch.meta.paragraph_notes.get(paragraph_id)?.trim();
+        if note.is_empty() {
+            None
+        } else {
+            Some(note.to_string())
+        }
     }
 
     /// Per-paragraph play button (#0024): queue show / prose / spelling for
@@ -313,12 +330,20 @@ impl super::CkWriterApp {
         let para = run.queue[run.current].clone();
         let total = run.queue.len();
         let idx = run.current;
-        let history = self.already_reviewed_quotes(pipeline, &para.id);
-        let history_refs: Vec<&str> = history.iter().map(String::as_str).collect();
+        let history = self.already_reviewed_history(pipeline, &para.id);
+        let history_refs: Vec<crate::llm::prompts::HistoryEntry<'_>> = history
+            .iter()
+            .map(|(q, n)| (q.as_str(), n.as_deref()))
+            .collect();
+        let paragraph_note = self.paragraph_note_for(&para.id);
         let Some(book) = self.book.as_ref() else { return };
         let in_scope = scope::voice_context_entities(book, &self.entity_hits);
         let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
-        let user = crate::llm::prompts::build_user_with_history(&para.prose, &history_refs);
+        let user = crate::llm::prompts::build_user_with_history(
+            &para.prose,
+            paragraph_note.as_deref(),
+            &history_refs,
+        );
         log::info!(
             "pipeline={} paragraph {}/{} id={} prose_chars={} system_bytes={} user_bytes={} history={}",
             pipeline.label(),
@@ -701,6 +726,7 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
                         status: Status::Proposed,
                         created_at: now,
                         resolved_at: None,
+                        dismissal_note: None,
                     },
                 );
                 added += 1;
@@ -1144,6 +1170,7 @@ mod tests {
             status,
             created_at: 1,
             resolved_at: None,
+            dismissal_note: None,
         }
     }
 
