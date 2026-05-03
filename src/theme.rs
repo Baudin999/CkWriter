@@ -35,6 +35,10 @@ pub const GUTTER_HAS_ISSUES: Color32 = Color32::from_rgb(0xd0, 0x55, 0x55);
 /// Paragraph parsed by all three per-paragraph pipelines, no drift, no
 /// active issues. The quiet baseline tone.
 pub const GUTTER_CLEAN: Color32 = Color32::from_rgb(0x55, 0x55, 0x5d);
+/// Paragraph the writer has hardened (#0005): the coach pipelines skip
+/// it entirely. Cool desaturated cyan reads as "settled / done" against
+/// the warm hue ramp the other states occupy.
+pub const GUTTER_LOCKED: Color32 = Color32::from_rgb(0x6a, 0xa8, 0xa8);
 
 pub const DIFF_REMOVED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
 pub const DIFF_INSERTED: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);

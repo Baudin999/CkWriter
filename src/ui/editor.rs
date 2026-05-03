@@ -405,6 +405,55 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         }
                     }
                 }
+
+                // Right-click → Lock/Unlock paragraph (#0005). Snapshot the
+                // target paragraph at click time so the menu closure (which
+                // runs every frame the menu is open) reads from a stable
+                // value. Galley-relative cursor mapping is the same path
+                // hover uses, so wrapping is honoured.
+                if response.secondary_clicked() {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let local = pointer - output.galley_pos;
+                        if output.galley.rect.contains(local.to_pos2()) {
+                            let cursor = output.galley.cursor_from_pos(local);
+                            let byte = char_to_byte(&app.editor_text, cursor.ccursor.index);
+                            app.editor_context_menu_target = app
+                                .current_paragraphs
+                                .iter()
+                                .find(|p| {
+                                    let (s, e) = p.char_range;
+                                    byte >= s && byte < e
+                                })
+                                .map(|p| (p.id.clone(), p.locked));
+                        } else {
+                            app.editor_context_menu_target = None;
+                        }
+                    }
+                }
+                let mut lock_toggle: Option<(String, bool)> = None;
+                response.context_menu(|ui| {
+                    let Some((pid, currently_locked)) =
+                        app.editor_context_menu_target.clone()
+                    else {
+                        ui.label(
+                            RichText::new("right-click on a paragraph")
+                                .color(theme::TEXT_MUTED),
+                        );
+                        return;
+                    };
+                    let label = if currently_locked {
+                        format!("{}  Unlock paragraph", icons::CIRCLE_O)
+                    } else {
+                        format!("{}  Lock paragraph", icons::CIRCLE)
+                    };
+                    if ui.button(label).clicked() {
+                        lock_toggle = Some((pid, !currently_locked));
+                        ui.close_menu();
+                    }
+                });
+                if let Some((pid, new_locked)) = lock_toggle {
+                    app.set_paragraph_lock(&pid, new_locked);
+                }
             });
             ui.add_space(pad_x);
         });
@@ -717,8 +766,9 @@ fn byte_to_char(text: &str, byte_offset: usize) -> usize {
 }
 
 /// Per-paragraph signal painted in the editor's left margin (#0023). Priority:
-/// `HasIssues` overrides every other state, then the parse-status states are
-/// derived from the show/prose/spelling cache.
+/// `Locked` (#0005) wins outright — a hardened paragraph is silenced from every
+/// pipeline, and the gutter says so first. Then `HasIssues` overrides the
+/// parse-status states, which derive from the show/prose/spelling cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GutterState {
     /// All three per-paragraph pipelines have cached this paragraph at the
@@ -733,6 +783,10 @@ enum GutterState {
     /// in this paragraph. Wins over the parse-status states because unresolved
     /// feedback is the primary thing the gutter is supposed to surface.
     HasIssues,
+    /// The writer has hardened this paragraph (#0005). Outranks every other
+    /// state because a locked paragraph is intentionally silent — the
+    /// pipelines skip it, so cache freshness and prior issues don't matter.
+    Locked,
 }
 
 /// Resolve the gutter state for a single paragraph against the chapter's
@@ -747,6 +801,9 @@ fn gutter_state_for(
     last_run_hashes: &BTreeMap<String, BTreeMap<String, String>>,
     revisions: &[Revision],
 ) -> GutterState {
+    if paragraph.locked {
+        return GutterState::Locked;
+    }
     let has_active_issue = revisions.iter().any(|r| {
         !r.is_dismissed
             && matches!(
@@ -790,6 +847,7 @@ fn gutter_color(state: GutterState) -> Color32 {
         GutterState::NeverParsed => theme::GUTTER_NEVER_PARSED,
         GutterState::Changed => theme::GUTTER_CHANGED,
         GutterState::HasIssues => theme::GUTTER_HAS_ISSUES,
+        GutterState::Locked => theme::GUTTER_LOCKED,
     }
 }
 
@@ -1295,6 +1353,34 @@ mod tests {
             states.iter().all(|s| *s == GutterState::Clean),
             "voice revision should not push to HasIssues: {states:?}"
         );
+    }
+
+    #[test]
+    fn locked_paragraph_overrides_has_issues() {
+        // Locked is the highest-priority gutter state — even an active
+        // unresolved issue must not push past it. Lock is the writer's
+        // explicit "stop telling me about this paragraph."
+        let mut paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        let mid_id = paragraphs[1].id.clone();
+        paragraphs[1].locked = true;
+        let revs = vec![revision_anchored_in(1, Pipeline::Prose, &mid_id, false)];
+        let states = states_for(&paragraphs, &cache, &revs);
+        assert_eq!(states[1], GutterState::Locked);
+    }
+
+    #[test]
+    fn locked_paragraph_overrides_clean() {
+        // Sanity — locked also wins against the quiet baseline state, so
+        // the writer can spot which paragraphs they've hardened at a
+        // glance against the otherwise-mostly-Clean column.
+        let mut paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        paragraphs[0].locked = true;
+        let states = states_for(&paragraphs, &cache, &[]);
+        assert_eq!(states[0], GutterState::Locked);
+        assert_eq!(states[1], GutterState::Clean);
+        assert_eq!(states[2], GutterState::Clean);
     }
 
     #[test]

@@ -148,10 +148,12 @@ mod tests {
                 ParagraphMeta {
                     id: "p_12345678".into(),
                     hash: "0123456789abcdef".into(),
+                    locked: false,
                 },
                 ParagraphMeta {
                     id: "p_abcdef01".into(),
                     hash: "fedcba9876543210".into(),
+                    locked: true,
                 },
             ],
             last_run_hashes,
@@ -178,6 +180,25 @@ mod tests {
         let meta = load(&dir, "Modern", "PreNotes");
         assert_eq!(meta.summary, "carryover");
         assert!(meta.paragraph_notes.is_empty());
+    }
+
+    #[test]
+    fn legacy_meta_without_locked_field_loads_unlocked() {
+        // Sidecars written before #0005 have no `locked` field on each
+        // ParagraphMeta entry. serde(default) must turn that into
+        // `locked: false`, preserving the prior behaviour where every
+        // paragraph reaches the coach.
+        let dir = tempdir();
+        let p = file_path(&dir, "Modern", "PreLocks");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"summary": "carryover", "paragraphs": [{"id": "p_aaaaaaaa", "hash": "abc"}]}"#,
+        )
+        .unwrap();
+        let meta = load(&dir, "Modern", "PreLocks");
+        assert_eq!(meta.paragraphs.len(), 1);
+        assert!(!meta.paragraphs[0].locked);
     }
 
     #[test]

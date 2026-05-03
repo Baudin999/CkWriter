@@ -518,6 +518,37 @@ impl super::CkWriterApp {
         });
     }
 
+    /// Set the lock state of `paragraph_id` (#0005). Mirrors the change onto
+    /// the live `current_paragraphs` so the gutter and the coach pipeline
+    /// see the new state on the next frame, and persists it through
+    /// `ParagraphMeta::locked` in the chapter sidecar. No-op if the
+    /// paragraph id is unknown — the runtime view and the persisted index
+    /// can drift for a single frame after a hash-changing edit; the next
+    /// `refresh_chapter_paragraph_index` reconciles them.
+    pub fn set_paragraph_lock(&mut self, paragraph_id: &str, locked: bool) {
+        let Some(ch) = self.current_chapter.as_ref() else {
+            return;
+        };
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        if folder.is_empty() || name.is_empty() {
+            return;
+        }
+        if let Some(p) = self
+            .current_paragraphs
+            .iter_mut()
+            .find(|p| p.id == paragraph_id)
+        {
+            p.locked = locked;
+        }
+        let pid = paragraph_id.to_string();
+        self.update_chapter_meta(&folder, &name, |m| {
+            if let Some(meta) = m.paragraphs.iter_mut().find(|m| m.id == pid) {
+                meta.locked = locked;
+            }
+        });
+    }
+
     /// Persist the per-dismissal reason note for the suggestion identified
     /// by `suggestion_id` (#0027). Empty / whitespace-only `note` clears
     /// the field back to `None` so an empty annotation doesn't render as

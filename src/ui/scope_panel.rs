@@ -1590,6 +1590,16 @@ fn chapter_readonly_stats(ui: &mut egui::Ui, meta: &crate::book::chapter_meta::C
             );
             ui.label(RichText::new(format_unix_seconds(meta.last_coached_at)));
             ui.end_row();
+
+            ui.label(
+                RichText::new("locked paragraphs")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let locked = meta.paragraphs.iter().filter(|p| p.locked).count();
+            let total = meta.paragraphs.len();
+            ui.label(RichText::new(format!("{locked} / {total}")));
+            ui.end_row();
         });
 }
 

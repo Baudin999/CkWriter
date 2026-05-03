@@ -1027,6 +1027,10 @@ fn paragraph_id_for_offset(byte_offset: usize, paragraphs: &[Paragraph]) -> Opti
 /// carries the paragraph-local LaTeX→prose translation, snapshotted now so
 /// a mid-run edit can't shift offsets under the streaming loop. Pure
 /// function so the dirty-set logic is testable without spinning up the app.
+///
+/// Locked paragraphs (#0005) short-circuit before the cache check: the
+/// writer has hardened them, so they're never prompted to any pipeline,
+/// regardless of cache state.
 pub fn compute_dirty_paragraphs(
     paragraphs: &[Paragraph],
     editor_text: &str,
@@ -1034,6 +1038,9 @@ pub fn compute_dirty_paragraphs(
 ) -> Vec<PendingParagraph> {
     let mut out = Vec::new();
     for p in paragraphs {
+        if p.locked {
+            continue;
+        }
         let cache_hit = cached_hashes
             .get(&p.id)
             .is_some_and(|h| h == &p.hash);
@@ -1149,6 +1156,21 @@ mod tests {
         let dirty = compute_dirty_paragraphs(&parsed, src, &cache);
         // Empty cache => every paragraph is dirty (first run for this pipeline).
         assert_eq!(dirty.len(), parsed.len());
+    }
+
+    #[test]
+    fn locked_paragraphs_skip_dirty_set_even_with_empty_cache() {
+        // A locked paragraph must short-circuit before any cache check, so
+        // the model is never prompted for it — the central guarantee of
+        // #0005. Cache is empty here so without the lock check both
+        // paragraphs would be dirty.
+        let src = "first paragraph here.\n\nsecond paragraph here.\n";
+        let mut parsed = parse_and_match(src, &[]);
+        parsed[0].locked = true;
+        let cache = BTreeMap::new();
+        let dirty = compute_dirty_paragraphs(&parsed, src, &cache);
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].id, parsed[1].id);
     }
 
     fn rec(

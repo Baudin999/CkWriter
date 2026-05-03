@@ -242,6 +242,13 @@ pub struct CkWriterApp {
     /// way to position wrapped LaTeX paragraphs (line-counting on `\n` is
     /// wildly wrong because one source line wraps to many visual rows).
     pub pending_scroll_to_cursor: bool,
+    /// Captures the (paragraph_id, currently_locked) snapshot of the most
+    /// recent right-click in the editor, so the context_menu closure
+    /// (#0005) can render the right Lock/Unlock label and route the
+    /// click. Cleared lazily on the next right-click; staleness across
+    /// menu sessions is harmless because the menu only opens after a
+    /// fresh `secondary_clicked`.
+    pub editor_context_menu_target: Option<(String, bool)>,
 
     // === Diff view ===
     /// When true, the central panel renders the diff view (HEAD baseline on
@@ -334,6 +341,7 @@ impl CkWriterApp {
             pending_scroll_offset: None,
             pending_cursor_char: None,
             pending_scroll_to_cursor: false,
+            editor_context_menu_target: None,
             diff_mode: false,
             diff_baseline: None,
             diff_baseline_chapter: None,

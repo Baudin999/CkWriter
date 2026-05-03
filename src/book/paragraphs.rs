@@ -63,6 +63,12 @@ pub struct ParagraphMeta {
     pub id: String,
     #[serde(default)]
     pub hash: String,
+    /// `true` when the writer has hardened this paragraph (#0005). Skipped
+    /// by every per-paragraph pipeline so the model is never prompted for
+    /// it — zero tokens, no flags. Persisted; orphans on id rotation, same
+    /// trade-off as `paragraph_notes` (#0027).
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// Runtime view of a paragraph. `char_range` is byte offsets into the source
@@ -73,6 +79,10 @@ pub struct Paragraph {
     pub id: String,
     pub hash: String,
     pub char_range: (usize, usize),
+    /// Mirror of `ParagraphMeta::locked` for the runtime path. Carried
+    /// across edits in `assign_ids` so locks survive keystrokes; reset to
+    /// `false` for paragraphs minted with a fresh id.
+    pub locked: bool,
     /// Normalized content kept in memory so cross-edit Jaccard matching has
     /// fingerprint material to work with. Not persisted — across sessions we
     /// rely on exact hash equality.
@@ -84,6 +94,7 @@ impl Paragraph {
         ParagraphMeta {
             id: self.id.clone(),
             hash: self.hash.clone(),
+            locked: self.locked,
         }
     }
 }
@@ -98,6 +109,7 @@ pub fn parse_and_match(text: &str, prior: &[Paragraph]) -> Vec<Paragraph> {
             id: String::new(),
             hash: b.hash,
             char_range: b.char_range,
+            locked: false,
             normalized: b.normalized,
         })
         .collect();
@@ -116,6 +128,7 @@ pub fn parse_and_match_meta(text: &str, prior: &[ParagraphMeta]) -> Vec<Paragrap
             id: m.id.clone(),
             hash: m.hash.clone(),
             char_range: (0, 0),
+            locked: m.locked,
             normalized: String::new(),
         })
         .collect();
@@ -130,7 +143,7 @@ pub fn differs(new: &[Paragraph], prior: &[ParagraphMeta]) -> bool {
     }
     new.iter()
         .zip(prior.iter())
-        .any(|(a, b)| a.id != b.id || a.hash != b.hash)
+        .any(|(a, b)| a.id != b.id || a.hash != b.hash || a.locked != b.locked)
 }
 
 // ============================================================================
@@ -422,6 +435,7 @@ fn assign_ids(new: &mut [Paragraph], prior: &[Paragraph]) {
         if let Some(pos) = list.iter().position(|&pi| !prior_taken[pi]) {
             let pi = list[pos];
             np.id = prior[pi].id.clone();
+            np.locked = prior[pi].locked;
             prior_taken[pi] = true;
             new_assigned[i] = true;
         }
@@ -461,6 +475,7 @@ fn assign_ids(new: &mut [Paragraph], prior: &[Paragraph]) {
             continue;
         }
         new[i].id = prior[j].id.clone();
+        new[i].locked = prior[j].locked;
         prior_taken[j] = true;
         new_assigned[i] = true;
     }
@@ -747,6 +762,69 @@ mod tests {
         let mut meta: Vec<ParagraphMeta> = parsed.iter().map(|p| p.meta()).collect();
         meta[0].hash = "deadbeefdeadbeef".into();
         assert!(differs(&parsed, &meta));
+    }
+
+    #[test]
+    fn differs_detects_lock_flip() {
+        // Locking a paragraph flips its persisted state without touching
+        // id or hash; differs must still report the change so the index
+        // refresh path knows to write through to disk.
+        let parsed = parse_fresh("first paragraph here.\n");
+        let mut meta: Vec<ParagraphMeta> = parsed.iter().map(|p| p.meta()).collect();
+        assert!(!differs(&parsed, &meta));
+        meta[0].locked = true;
+        assert!(differs(&parsed, &meta));
+    }
+
+    #[test]
+    fn lock_carries_across_unchanged_text() {
+        // Editing other paragraphs must not unlock a paragraph whose id is
+        // preserved by hash match (step 1) in `assign_ids`.
+        let p_a = long_para("Alpha");
+        let p_b = long_para("Beta");
+        let v1 = format!("{p_a}\n\n{p_b}\n");
+        let mut first = parse_fresh(&v1);
+        // Lock the first paragraph manually — simulates the right-click
+        // flow producing a new runtime view.
+        first[0].locked = true;
+        let p_b2 = long_para("Beta two edited");
+        let v2 = format!("{p_a}\n\n{p_b2}\n");
+        let second = parse_and_match(&v2, &first);
+        assert_eq!(second[0].id, first[0].id);
+        assert!(second[0].locked, "lock survives edit on a sibling");
+        assert!(!second[1].locked, "edited sibling stays unlocked");
+    }
+
+    #[test]
+    fn lock_survives_reopen_through_meta() {
+        // Persistence path: a locked runtime paragraph round-trips its
+        // lock state through ParagraphMeta and back via
+        // `parse_and_match_meta`, the chapter-open code path.
+        let p_a = long_para("Alpha");
+        let v = format!("{p_a}\n");
+        let mut parsed = parse_fresh(&v);
+        parsed[0].locked = true;
+        let meta: Vec<ParagraphMeta> = parsed.iter().map(|p| p.meta()).collect();
+        assert!(meta[0].locked);
+        let reloaded = parse_and_match_meta(&v, &meta);
+        assert_eq!(reloaded.len(), 1);
+        assert!(reloaded[0].locked);
+    }
+
+    #[test]
+    fn fresh_paragraph_starts_unlocked() {
+        // A newly minted paragraph (no prior id match) starts with
+        // `locked: false` regardless of any sibling's state.
+        let p_a = long_para("Alpha");
+        let v1 = format!("{p_a}\n");
+        let mut first = parse_fresh(&v1);
+        first[0].locked = true;
+        let p_b = long_para("Beta");
+        let v2 = format!("{p_a}\n\n{p_b}\n");
+        let second = parse_and_match(&v2, &first);
+        assert_eq!(second.len(), 2);
+        assert!(second[0].locked, "carryover keeps the lock");
+        assert!(!second[1].locked, "new paragraph defaults unlocked");
     }
 
     #[test]
