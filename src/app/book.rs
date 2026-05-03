@@ -1,4 +1,5 @@
-use crate::book::{Book, Chapter};
+use crate::book::manuscript::ChapterRef;
+use crate::book::{chapters as chapter_ops, Book, Chapter};
 use crate::extract::EntityMatcher;
 use std::path::Path;
 
@@ -90,18 +91,26 @@ impl super::CkWriterApp {
                 }
                 if let Some(book) = &self.book {
                     self.current_chapter = book.chapter_by_path(path).cloned().or_else(|| {
+                        let include_path = path
+                            .strip_prefix(&book.root)
+                            .ok()
+                            .and_then(|p| p.with_extension("").to_str().map(str::to_string))
+                            .unwrap_or_else(|| path.display().to_string());
+                        let folder = include_path
+                            .split_once('/')
+                            .map(|(f, _)| f.to_string())
+                            .unwrap_or_default();
+                        let stem = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Untitled");
+                        let name = crate::book::manuscript::strip_number_prefix(stem).to_string();
                         Some(Chapter {
-                            include_path: path
-                                .strip_prefix(&book.root)
-                                .ok()
-                                .and_then(|p| p.with_extension("").to_str().map(str::to_string))
-                                .unwrap_or_else(|| path.display().to_string()),
+                            folder,
+                            name,
+                            include_path,
                             file_path: path.to_path_buf(),
-                            display_title: path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Untitled")
-                                .to_string(),
+                            display_title: stem.to_string(),
                             in_manuscript: false,
                         })
                     });
@@ -134,6 +143,138 @@ impl super::CkWriterApp {
         // chapter's edits are reflected in the inspector's "Appears in" list.
         self.rebuild_char_index();
         Ok(())
+    }
+
+    /// Add a new chapter under `folder` with `title`. Saves any pending
+    /// editor edits first so the chapter ops module never has to worry
+    /// about the in-flight buffer. Opens the new chapter for editing.
+    pub fn add_chapter(&mut self, folder: &str, title: &str) -> anyhow::Result<()> {
+        if self.dirty {
+            let _ = self.save_chapter();
+        }
+        let Some(book) = self.book.as_mut() else {
+            return Err(anyhow::anyhow!("no book open"));
+        };
+        let main_tex_name = book.config.main_tex.clone();
+        let entry = chapter_ops::add_chapter(
+            &book.root.clone(),
+            &main_tex_name,
+            &mut book.manuscript,
+            folder,
+            title,
+        )?;
+        book.reload_chapters();
+        let target_path = book
+            .chapters
+            .iter()
+            .find(|c| c.folder == entry.folder && c.name == entry.name)
+            .map(|c| c.file_path.clone());
+        if let Some(p) = target_path {
+            self.open_chapter(&p);
+        }
+        Ok(())
+    }
+
+    /// Delete a chapter file and remove it from the manuscript. If the
+    /// deleted chapter is currently open, clears the editor.
+    pub fn delete_chapter(&mut self, folder: &str, name: &str) -> anyhow::Result<()> {
+        if self.dirty {
+            let _ = self.save_chapter();
+        }
+        let Some(book) = self.book.as_mut() else {
+            return Err(anyhow::anyhow!("no book open"));
+        };
+        let main_tex_name = book.config.main_tex.clone();
+        let root = book.root.clone();
+        chapter_ops::delete_chapter(&root, &main_tex_name, &mut book.manuscript, folder, name)?;
+        book.reload_chapters();
+        if let Some(ch) = self.current_chapter.as_ref() {
+            if ch.folder == folder && ch.name == name {
+                self.current_chapter = None;
+                self.editor_text.clear();
+                self.entity_hits.clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop a chapter from the manuscript without deleting its file.
+    pub fn exclude_chapter(&mut self, folder: &str, name: &str) -> anyhow::Result<()> {
+        if self.dirty {
+            let _ = self.save_chapter();
+        }
+        let Some(book) = self.book.as_mut() else {
+            return Err(anyhow::anyhow!("no book open"));
+        };
+        let main_tex_name = book.config.main_tex.clone();
+        let root = book.root.clone();
+        chapter_ops::exclude_chapter(&root, &main_tex_name, &mut book.manuscript, folder, name)?;
+        book.reload_chapters();
+        // The current chapter's filename just changed (number stripped); resync
+        // its file_path so subsequent saves go to the right file.
+        self.resync_current_chapter();
+        Ok(())
+    }
+
+    /// Append an existing orphan back into the manuscript.
+    pub fn include_chapter(&mut self, folder: &str, name: &str) -> anyhow::Result<()> {
+        if self.dirty {
+            let _ = self.save_chapter();
+        }
+        let Some(book) = self.book.as_mut() else {
+            return Err(anyhow::anyhow!("no book open"));
+        };
+        let main_tex_name = book.config.main_tex.clone();
+        let root = book.root.clone();
+        chapter_ops::include_chapter(&root, &main_tex_name, &mut book.manuscript, folder, name)?;
+        book.reload_chapters();
+        self.resync_current_chapter();
+        Ok(())
+    }
+
+    /// Replace the manuscript order. Renumbers files per folder; the open
+    /// chapter's file_path is updated to its new path on disk.
+    pub fn reorder_manuscript(&mut self, new_order: Vec<ChapterRef>) -> anyhow::Result<()> {
+        if self.dirty {
+            let _ = self.save_chapter();
+        }
+        let Some(book) = self.book.as_mut() else {
+            return Err(anyhow::anyhow!("no book open"));
+        };
+        let main_tex_name = book.config.main_tex.clone();
+        let root = book.root.clone();
+        chapter_ops::reorder_manuscript(&root, &main_tex_name, &mut book.manuscript, new_order)?;
+        book.reload_chapters();
+        self.resync_current_chapter();
+        Ok(())
+    }
+
+    /// After a manuscript op renames the open chapter's file, look it up by
+    /// (folder, name) — its identity — and refresh `current_chapter` to the
+    /// new path. Without this, Cmd+S would write to a path that no longer
+    /// exists and the diff view would chase stale baselines.
+    fn resync_current_chapter(&mut self) {
+        let Some(ch) = self.current_chapter.as_ref().cloned() else {
+            return;
+        };
+        let Some(book) = self.book.as_ref() else {
+            return;
+        };
+        if let Some(found) = book
+            .chapters
+            .iter()
+            .find(|c| c.folder == ch.folder && c.name == ch.name)
+        {
+            self.current_chapter = Some(found.clone());
+            self.diff_baseline = None;
+            self.diff_baseline_chapter = None;
+            self.diff_baseline_error = None;
+        } else {
+            // Chapter no longer exists (deleted upstream); clear.
+            self.current_chapter = None;
+            self.editor_text.clear();
+            self.entity_hits.clear();
+        }
     }
 
     /// Lazily load the `HEAD` baseline for the current chapter. Cached by

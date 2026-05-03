@@ -8,6 +8,7 @@ pub const EDITOR_PAGE: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x20);
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xe6, 0xe6, 0xe6);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x90);
 pub const ACCENT: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
+pub const ERROR: Color32 = Color32::from_rgb(0xf7, 0x6a, 0x6a);
 pub const ENTITY_CHARACTER: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const ENTITY_LOCATION: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
 pub const REVISION_VOICE: Color32 = Color32::from_rgb(0xf7, 0xc8, 0x6a);

@@ -14,6 +14,27 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+/// In-progress state for the "+ New chapter" modal. Folder defaults to the
+/// first managed folder (`Ancient`) so the writer can usually just type a
+/// title and hit Enter.
+#[derive(Debug, Clone)]
+pub struct NewChapterDialog {
+    pub folder: String,
+    pub title: String,
+}
+
+impl Default for NewChapterDialog {
+    fn default() -> Self {
+        Self {
+            folder: crate::book::manuscript::MANAGED_FOLDERS
+                .first()
+                .map(|s| (*s).to_string())
+                .unwrap_or_default(),
+            title: String::new(),
+        }
+    }
+}
+
 mod book;
 mod chat;
 mod coach;
@@ -108,10 +129,25 @@ pub struct CkWriterApp {
     pub picker_path: String,
     /// Directory paths currently expanded in the file tree sidebar.
     pub expanded_dirs: HashSet<PathBuf>,
+    /// Active tab in the left sidebar (Manuscript vs All Files).
+    pub file_tree_tab: ui::file_tree::FileTreeTab,
     pub show_settings: bool,
     pub settings_dirty: bool,
     pub last_settings_save: f64,
     pub import_status: Option<String>,
+
+    // === Chapter-management dialogs ===
+    /// When `Some`, the "+ New chapter" modal is open. The fields hold the
+    /// in-progress folder selection and title input; cleared when the user
+    /// confirms or cancels.
+    pub new_chapter_dialog: Option<NewChapterDialog>,
+    /// When `Some`, a "Delete chapter?" confirm is open for the named
+    /// chapter. The user has to click Delete a second time inside the modal,
+    /// since deleting a chapter is unrecoverable from inside CkWriter.
+    pub delete_chapter_confirm: Option<(String, String)>,
+    /// Last error from a chapter operation, surfaced on the sidebar so
+    /// failures don't get lost in the log.
+    pub chapter_op_error: Option<String>,
 
     // === Notes ===
     pub notes_text: String,
@@ -205,10 +241,14 @@ impl CkWriterApp {
             show_book_picker: false,
             picker_path: String::new(),
             expanded_dirs: HashSet::new(),
+            file_tree_tab: ui::file_tree::FileTreeTab::default(),
             show_settings: false,
             settings_dirty: false,
             last_settings_save: 0.0,
             import_status: None,
+            new_chapter_dialog: None,
+            delete_chapter_confirm: None,
+            chapter_op_error: None,
             notes_text: String::new(),
             notes_dirty: false,
             notes_path: None,
@@ -331,6 +371,108 @@ impl CkWriterApp {
             self.show_book_picker = false;
         }
     }
+
+    fn new_chapter_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dlg) = self.new_chapter_dialog.take() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+
+        egui::Window::new("New chapter")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Folder:");
+                egui::ComboBox::from_id_salt("new-chapter-folder")
+                    .selected_text(&dlg.folder)
+                    .show_ui(ui, |ui| {
+                        for f in crate::book::manuscript::MANAGED_FOLDERS {
+                            ui.selectable_value(&mut dlg.folder, (*f).to_string(), *f);
+                        }
+                    });
+                ui.label("Title:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut dlg.title)
+                        .desired_width(320.0)
+                        .hint_text("e.g. First Encounter"),
+                );
+                resp.request_focus();
+                let enter_pressed =
+                    resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    let create_clicked = ui
+                        .add_enabled(!dlg.title.trim().is_empty(), egui::Button::new("Create"))
+                        .clicked();
+                    if create_clicked || enter_pressed {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if confirm {
+            let folder = dlg.folder.clone();
+            let title = dlg.title.clone();
+            match self.add_chapter(&folder, &title) {
+                Ok(()) => {
+                    self.chapter_op_error = None;
+                    self.new_chapter_dialog = None;
+                }
+                Err(e) => {
+                    self.chapter_op_error = Some(format!("add chapter: {e}"));
+                    self.new_chapter_dialog = Some(dlg);
+                }
+            }
+        } else if cancel {
+            self.new_chapter_dialog = None;
+        } else {
+            self.new_chapter_dialog = Some(dlg);
+        }
+    }
+
+    fn delete_chapter_confirm(&mut self, ctx: &egui::Context) {
+        let Some((folder, name)) = self.delete_chapter_confirm.clone() else {
+            return;
+        };
+        let mut confirmed = false;
+        let mut cancel = false;
+
+        egui::Window::new("Delete chapter?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Permanently delete {folder}/{name}?"));
+                ui.label(
+                    egui::RichText::new("This removes the .tex file from disk.")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            if let Err(e) = self.delete_chapter(&folder, &name) {
+                self.chapter_op_error = Some(format!("delete chapter: {e}"));
+            } else {
+                self.chapter_op_error = None;
+            }
+            self.delete_chapter_confirm = None;
+        } else if cancel {
+            self.delete_chapter_confirm = None;
+        }
+    }
 }
 
 impl App for CkWriterApp {
@@ -438,6 +580,8 @@ impl App for CkWriterApp {
         });
 
         self.book_picker(ctx);
+        self.new_chapter_dialog(ctx);
+        self.delete_chapter_confirm(ctx);
         ui::settings_dialog::show(self, ctx);
 
         if !self.show_book_picker && self.book.is_none() {
