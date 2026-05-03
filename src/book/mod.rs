@@ -5,6 +5,7 @@ pub mod dismissals;
 pub mod entity;
 pub mod latex;
 pub mod manuscript;
+pub mod paragraphs;
 pub mod tree;
 
 use anyhow::{anyhow, Result};

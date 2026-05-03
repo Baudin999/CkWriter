@@ -1,4 +1,5 @@
 use crate::book::manuscript::ChapterRef;
+use crate::book::paragraphs::{self, ParagraphMeta};
 use crate::book::{chapters as chapter_ops, Book, Chapter};
 use crate::extract::EntityMatcher;
 use std::path::Path;
@@ -28,6 +29,7 @@ impl super::CkWriterApp {
         self.current_chapter = None;
         self.editor_text.clear();
         self.entity_hits.clear();
+        self.current_paragraphs.clear();
         self.revisions.clear();
         self.selected_revision = None;
         self.dirty = false;
@@ -136,17 +138,24 @@ impl super::CkWriterApp {
         let Some(ch) = &self.current_chapter else {
             return Ok(());
         };
-        std::fs::write(&ch.file_path, &self.editor_text)?;
-        self.dirty = false;
-        // Recompute and persist word_count from the just-saved prose. Cheap
-        // (regex pass + whitespace split) and keeps the Chapter tab honest
-        // without a separate "stats" job.
+        let file_path = ch.file_path.clone();
         let folder = ch.folder.clone();
         let name = ch.name.clone();
+        std::fs::write(&file_path, &self.editor_text)?;
+        self.dirty = false;
+        // Recompute word_count + paragraph index from the just-saved buffer.
+        // Both are cheap (single regex pass + a normalize-and-hash sweep) and
+        // keep the persisted view in lockstep with the file.
         if !folder.is_empty() && !name.is_empty() {
             let prose = crate::book::latex::to_prose(&self.editor_text);
             let wc = crate::book::chapter_meta::word_count_from_prose(&prose);
-            self.update_chapter_meta(&folder, &name, |m| m.word_count = wc);
+            let parsed = paragraphs::parse_and_match(&self.editor_text, &self.current_paragraphs);
+            let new_meta: Vec<ParagraphMeta> = parsed.iter().map(|p| p.meta()).collect();
+            self.current_paragraphs = parsed;
+            self.update_chapter_meta(&folder, &name, |m| {
+                m.word_count = wc;
+                m.paragraphs = new_meta;
+            });
         }
         // Cross-chapter index reads from disk; refresh it so the just-saved
         // chapter's edits are reflected in the inspector's "Appears in" list.
@@ -234,6 +243,7 @@ impl super::CkWriterApp {
                 self.current_chapter = None;
                 self.editor_text.clear();
                 self.entity_hits.clear();
+                self.current_paragraphs.clear();
             }
         }
         Ok(())
@@ -315,6 +325,7 @@ impl super::CkWriterApp {
             self.current_chapter = None;
             self.editor_text.clear();
             self.entity_hits.clear();
+            self.current_paragraphs.clear();
         }
     }
 
@@ -375,22 +386,39 @@ impl super::CkWriterApp {
     }
 
     /// Initialise (or replace) the chapter-tab draft from the current
-    /// chapter's saved metadata. Called whenever the active chapter changes
-    /// — any unsaved edits in the previous draft are discarded, mirroring how
-    /// the legacy `.notes.md` scratchpad worked.
+    /// chapter's saved metadata, and rebuild `current_paragraphs` from the
+    /// open file. Called whenever the active chapter changes — any unsaved
+    /// edits in the previous draft are discarded, mirroring how the legacy
+    /// `.notes.md` scratchpad worked.
     pub fn seed_chapter_draft(&mut self) {
-        let Some(ch) = &self.current_chapter else {
+        let Some(ch) = self.current_chapter.as_ref() else {
             self.chapter_draft = None;
+            self.current_paragraphs.clear();
             return;
         };
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        let prior_meta = ch.meta.paragraphs.clone();
         self.chapter_draft = Some(crate::app::ChapterDraft {
-            folder: ch.folder.clone(),
-            name: ch.name.clone(),
+            folder: folder.clone(),
+            name: name.clone(),
             summary: ch.meta.summary.clone(),
             goals: ch.meta.goals.clone(),
             plot_notes: ch.meta.plot_notes.clone(),
             dirty: false,
         });
+
+        // Build the runtime paragraph index against the on-disk index. If the
+        // file's been edited outside the app (or this is the first open after
+        // adding the field), the result will differ — persist it so future
+        // opens see a stable index.
+        let parsed = paragraphs::parse_and_match_meta(&self.editor_text, &prior_meta);
+        let needs_save = paragraphs::differs(&parsed, &prior_meta);
+        let new_meta: Vec<ParagraphMeta> = parsed.iter().map(|p| p.meta()).collect();
+        self.current_paragraphs = parsed;
+        if needs_save && !folder.is_empty() && !name.is_empty() {
+            self.update_chapter_meta(&folder, &name, |m| m.paragraphs = new_meta);
+        }
     }
 
     /// Persist the chapter-tab draft into the chapter's metadata file. No-op

@@ -1,4 +1,5 @@
 use crate::book::entity::Entity;
+use crate::book::paragraphs::Paragraph;
 use crate::book::{Book, Chapter};
 use crate::extract::{EntityHit, EntityMatcher};
 use crate::index::CrossChapterIndex;
@@ -79,6 +80,10 @@ pub struct CkWriterApp {
     pub editor_text: String,
     pub dirty: bool,
     pub entity_hits: Vec<EntityHit>,
+    /// Paragraph index for the open chapter, in source order. Recomputed on
+    /// chapter open and on save; cleared when no chapter is open. Drives
+    /// per-paragraph caching (#0004) and cursor-to-paragraph mapping (#0005).
+    pub current_paragraphs: Vec<Paragraph>,
 
     // === Entity editing ===
     pub scope_tab: ui::scope_panel::Tab,
@@ -226,6 +231,7 @@ impl CkWriterApp {
             editor_text: String::new(),
             dirty: false,
             entity_hits: Vec::new(),
+            current_paragraphs: Vec::new(),
             scope_tab: ui::scope_panel::Tab::Characters,
             char_sub_tab: ui::scope_panel::CharSubTab::Cast,
             selected_entity: None,

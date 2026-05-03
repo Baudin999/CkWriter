@@ -10,6 +10,7 @@
 //! today (`pov`, `tags`) are storage-only in v1 — UI lands when those tickets
 //! land.
 
+use crate::book::paragraphs::ParagraphMeta;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,11 @@ pub struct ChapterMeta {
     /// this chapter.
     #[serde(default)]
     pub last_coached_at: Option<i64>,
+    /// Stable per-paragraph index — id + content hash, in source order. The
+    /// substrate that #0003–#0005 hang off; recomputed on chapter open and on
+    /// save. See `book::paragraphs` for the splitter and matcher.
+    #[serde(default)]
+    pub paragraphs: Vec<ParagraphMeta>,
 }
 
 pub fn file_path(root: &Path, folder: &str, name: &str) -> PathBuf {
@@ -108,10 +114,38 @@ mod tests {
             word_count: 1234,
             voice_score: Some(72),
             last_coached_at: Some(1_700_000_000),
+            paragraphs: vec![
+                ParagraphMeta {
+                    id: "p_12345678".into(),
+                    hash: "0123456789abcdef".into(),
+                },
+                ParagraphMeta {
+                    id: "p_abcdef01".into(),
+                    hash: "fedcba9876543210".into(),
+                },
+            ],
         };
         save(&dir, "Modern", "Awakening", &meta).expect("save");
         let loaded = load(&dir, "Modern", "Awakening");
         assert_eq!(loaded, meta);
+    }
+
+    #[test]
+    fn legacy_meta_without_paragraphs_loads_empty_index() {
+        // A sidecar written before #0002 has no `paragraphs` field at all.
+        // serde(default) must turn that into an empty Vec, not a parse error.
+        let dir = tempdir();
+        let p = file_path(&dir, "Modern", "Legacy");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"{"summary": "carryover", "word_count": 12}"#,
+        )
+        .unwrap();
+        let meta = load(&dir, "Modern", "Legacy");
+        assert_eq!(meta.summary, "carryover");
+        assert_eq!(meta.word_count, 12);
+        assert!(meta.paragraphs.is_empty());
     }
 
     #[test]
