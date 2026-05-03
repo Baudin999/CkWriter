@@ -34,3 +34,28 @@ The whole chapter still needs to be in the model's context so voice consistency,
 - Why pass the full chapter for a single-paragraph ask? Voice and show-don't-tell flags depend on chapter-level pacing and tone; cutting context to one paragraph degrades quality. The cost is unchanged context tokens; the win is fewer output flags and tighter focus.
 - Why not a selection-based scope in v1? Paragraph_id is already the substrate; selections add an anchor-resolution layer with no extra value for the cursor-on-paragraph workflow. Re-file as a follow-up if it comes up.
 - Future interaction with #0004: paragraph-focused runs should bypass per-paragraph cache (the writer is asking for a fresh take on this paragraph specifically). Cache-write still happens.
+- Distinct from existing `start_single_paragraph_run` (#0024 play button): that path sends only the paragraph as prose. Focus mode sends the full chapter as prose with a system-prompt directive scoping output. Two different modes; do not collapse.
+
+## Implementation plan
+
+Build in two phases. Phase 1 is the contract (testable without UI); phase 2 wires it up.
+
+### Phase 1 — contract layer
+1. **`src/llm/prompts.rs`** — add `FocusContext { paragraph_id: String, paragraph_text: String }`. Extend `build_system` with optional `focus: Option<&FocusContext>`. When `Some`, append a directive after the pipeline instructions: full chapter is for context, only emit flags whose `quote` is an exact substring of `<paragraph_text>`. Off-target flags will be dropped server-side. `focus = None` must produce byte-identical output to today's `build_system` (regression test).
+2. **`src/app/coach.rs`** — `CoachRun` gains `focus: Option<FocusParagraph>` where `FocusParagraph { id, text }`. New entry point `run_pipeline_focus(pipeline, paragraph_id)` parallel to `run_pipeline`: refuses if paragraph is locked, builds a one-entry queue containing the *full chapter prose* (mirror `start_paragraph_run` chapter-mode path, not `start_single_paragraph_run`), threads `focus` through to prompt construction. Bypasses cache read; cache write still lands for the focus paragraph only.
+3. **Ingest filter** — at the point where parsed flags become `Suggestion`s, when `focus.is_some()`, drop any flag whose `quote` is not a substring of `focus.text`. Log each drop: `WARN focus={paragraph_id} dropped off-target flag: <quote-truncated>`.
+4. **Voice score guard** — when `focus.is_some()` on a `Pipeline::Voice` run, skip the chapter score update.
+5. **Logging** — extend the existing pipeline-start log line with `focus=<paragraph_id>` (or `focus=none`) so prompt construction is auditable. `prose_chars` already covers AC #3.
+
+### Phase 2 — UI
+6. **Cursor → paragraph_id** helper in `src/ui/editor.rs` (or wherever the editor exposes its cursor): walk `current_paragraphs[].char_range` for the cursor offset. Returns `Option<&Paragraph>`.
+7. **Pipeline buttons** — paired "this paragraph" button next to each of the four pipeline buttons. Disabled when cursor isn't inside a paragraph or paragraph is locked. Click → `run_pipeline_focus`.
+
+### Tests (contract proof)
+- `prompts::tests::build_system_focus_appends_directive_with_paragraph_text`
+- `prompts::tests::build_system_no_focus_byte_identical_to_legacy`
+- `coach::tests::focus_run_uses_full_chapter_prose`
+- `coach::tests::focus_run_drops_off_target_flag`
+- `coach::tests::focus_run_keeps_on_target_flag`
+- `coach::tests::focus_voice_run_does_not_update_score`
+- `coach::tests::focus_run_refuses_locked_paragraph`
