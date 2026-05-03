@@ -2,7 +2,7 @@ use super::IngestOutcome;
 use crate::book::dismissals::normalize as normalize_quote;
 use crate::book::latex;
 use crate::book::paragraphs::Paragraph;
-use crate::book::suggestions::{auto_stale, id_hash, Status, SuggestionRecord};
+use crate::book::suggestions::{auto_stale, fuzzy_match_record_id, id_hash, Status, SuggestionRecord};
 use crate::llm;
 use crate::llm::prompts::Pipeline;
 use crate::llm::revision::{FlagKind, Revision};
@@ -108,6 +108,47 @@ impl super::CkWriterApp {
         self.last_error = None;
     }
 
+    /// Collect raw quotes for non-Stale records (Dismissed + Accepted +
+    /// existing Proposed) matching `(pipeline, paragraph_id)` in the active
+    /// chapter's store. Used by per-paragraph runs (#0025) to feed the model
+    /// an "already reviewed — do not flag again" section, closing the loop
+    /// so dismissals don't get re-raised on every play-button click.
+    ///
+    /// Stale skipped: those are auto-swept tombstones for paragraphs the
+    /// writer rewrote — they're not deliberate "don't flag" intent.
+    fn already_reviewed_quotes(
+        &self,
+        pipeline: Pipeline,
+        paragraph_id: &str,
+    ) -> Vec<String> {
+        let Some(ch) = self.current_chapter.as_ref() else {
+            return Vec::new();
+        };
+        if ch.folder.is_empty() || ch.name.is_empty() {
+            return Vec::new();
+        }
+        let Some(book) = self.book.as_ref() else {
+            return Vec::new();
+        };
+        let Some(chapter_store) = book.suggestions.for_chapter(&ch.folder, &ch.name) else {
+            return Vec::new();
+        };
+        let pipeline_label = pipeline.label();
+        let mut out: Vec<String> = chapter_store
+            .records
+            .values()
+            .filter(|r| r.status != Status::Stale)
+            .filter(|r| r.pipeline == pipeline_label)
+            .filter(|r| r.paragraph_id.as_deref() == Some(paragraph_id))
+            .map(|r| r.quote.clone())
+            .collect();
+        // Sort + dedupe (a fuzzy match can leave near-duplicate quotes;
+        // exact-text duplicates are noise in the prompt).
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Per-paragraph play button (#0024): queue show / prose / spelling for
     /// the named paragraph and kick the queue drain. Always force-runs even
     /// if every pipeline's cache hash matches — the click is an explicit
@@ -170,8 +211,11 @@ impl super::CkWriterApp {
     /// Force-run `pipeline` against a single paragraph, bypassing the
     /// per-pipeline dirty-hash cache. Used by the per-paragraph play button
     /// (#0024). Caller guarantees no other stream is in flight.
+    ///
+    /// Builds a one-entry `CoachRun` and delegates the prompt build to
+    /// `start_next_paragraph_stream`, so the "Already reviewed" history
+    /// section (#0025) lands in both call sites without duplication.
     fn start_single_paragraph_run(&mut self, paragraph_id: &str, pipeline: Pipeline) {
-        let Some(book) = self.book.as_ref() else { return };
         let Some(paragraph) = self
             .current_paragraphs
             .iter()
@@ -211,34 +255,7 @@ impl super::CkWriterApp {
             prompt_tokens: 0,
             eval_tokens: 0,
         });
-        // Mirror the prompt build from `start_next_paragraph_stream` —
-        // can't call it directly because `coach_run` was just assigned and
-        // we need the `book` borrow in the same statement. The system /
-        // user / tuning shape are identical to a normal per-paragraph run.
-        let in_scope = scope::voice_context_entities(book, &self.entity_hits);
-        let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
-        let user = crate::llm::prompts::build_user(
-            &self.coach_run.as_ref().expect("just set").queue[0].prose,
-        );
-        let messages = vec![
-            llm::ChatMessage::system(system),
-            llm::ChatMessage::user(user),
-        ];
-        let tuning = llm::ChatTuning {
-            temperature: self.settings.coach_temperature,
-            num_ctx: 8_192,
-            num_predict: 2_048,
-        };
-        let handle = llm::chat_stream(
-            &self.settings.ollama_url,
-            &self.settings.model,
-            messages,
-            true,
-            tuning,
-        );
-        self.stream = Some(handle);
-        self.stream_pipeline = Some(pipeline);
-        self.last_error = None;
+        self.start_next_paragraph_stream();
     }
 
     fn start_paragraph_run(&mut self, pipeline: Pipeline) {
@@ -296,12 +313,14 @@ impl super::CkWriterApp {
         let para = run.queue[run.current].clone();
         let total = run.queue.len();
         let idx = run.current;
+        let history = self.already_reviewed_quotes(pipeline, &para.id);
+        let history_refs: Vec<&str> = history.iter().map(String::as_str).collect();
         let Some(book) = self.book.as_ref() else { return };
         let in_scope = scope::voice_context_entities(book, &self.entity_hits);
         let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
-        let user = crate::llm::prompts::build_user(&para.prose);
+        let user = crate::llm::prompts::build_user_with_history(&para.prose, &history_refs);
         log::info!(
-            "pipeline={} paragraph {}/{} id={} prose_chars={} system_bytes={} user_bytes={}",
+            "pipeline={} paragraph {}/{} id={} prose_chars={} system_bytes={} user_bytes={} history={}",
             pipeline.label(),
             idx + 1,
             total,
@@ -309,6 +328,7 @@ impl super::CkWriterApp {
             para.prose.chars().count(),
             system.len(),
             user.len(),
+            history.len(),
         );
         let messages = vec![
             llm::ChatMessage::system(system),
@@ -648,8 +668,23 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
             // status history untouched. This is the whole reason re-running a
             // pipeline doesn't pile up duplicate cards or override a prior
             // dismissal.
-            let already_existed = chapter_store.records.contains_key(&id);
-            if already_existed {
+            //
+            // Two-leg lookup (#0025): exact-id match first (cheap), then a
+            // fuzzy lookup against existing records in the same
+            // (pipeline, paragraph_id). The fuzzy leg catches the regression
+            // where the model picks a different quote substring for the same
+            // observation — exact normalization can't see that.
+            let existing_id = if chapter_store.records.contains_key(&id) {
+                Some(id.clone())
+            } else {
+                fuzzy_match_record_id(
+                    chapter_store,
+                    &pipeline_label,
+                    paragraph_id.as_deref(),
+                    &normalized,
+                )
+            };
+            if existing_id.is_some() {
                 already_seen += 1;
             } else {
                 chapter_store.records.insert(
@@ -754,6 +789,47 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
         //  - filter on: card disappears
         //  - filter off: card stays, but flagged is_dismissed = true so the
         //    panel renders it dimmed with a Restore action
+        self.rebuild_revisions_from_store();
+    }
+
+    /// Per-paragraph hard clear (#0025): drop every record (any status,
+    /// including Stale) whose `paragraph_id == Some(paragraph_id)` from the
+    /// active chapter's store. Use case: the writer wants a true blank
+    /// slate for this paragraph — the "do not flag" memory in the store is
+    /// in the way of an honest re-evaluation. Persists immediately and
+    /// rebuilds the revisions panel.
+    ///
+    /// Cancels any pending play-button entries for this paragraph so a
+    /// queued re-run doesn't surprise the writer mid-clear.
+    pub fn hard_clear_paragraph(&mut self, paragraph_id: &str) {
+        let Some(ch) = self.current_chapter.as_ref().cloned() else {
+            return;
+        };
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        if folder.is_empty() || name.is_empty() {
+            return;
+        }
+        let Some(book) = self.book.as_mut() else {
+            return;
+        };
+        let root = book.root.clone();
+        let chapter_store = book.suggestions.for_chapter_mut(&root, &folder, &name);
+        let before = chapter_store.records.len();
+        chapter_store
+            .records
+            .retain(|_, r| r.paragraph_id.as_deref() != Some(paragraph_id));
+        let removed = before - chapter_store.records.len();
+        if let Err(e) = book.suggestions.save_chapter(&root, &folder, &name) {
+            log::warn!("hard_clear_paragraph save failed: {e}");
+        }
+        // Drop queued play entries for this paragraph so a now-stale enqueue
+        // can't fire after we've cleared.
+        self.paragraph_play_queue
+            .retain(|(pid, _)| pid != paragraph_id);
+        log::info!(
+            "hard_clear_paragraph: paragraph_id={paragraph_id} removed={removed} chapter={folder}/{name}"
+        );
         self.rebuild_revisions_from_store();
     }
 

@@ -22,11 +22,10 @@ struct CachedLayoutJob {
 
 const MAX_COLUMN_WIDTH: f32 = 760.0;
 const MIN_COLUMN_WIDTH: f32 = 360.0;
-/// Tightened from 24 → 40 in #0024 to make room for the per-paragraph play
-/// glyph that sits left of the dirty bar. The bar itself uses ~11 px
-/// (`GUTTER_GAP_PX + GUTTER_WIDTH_PX`); the play icon needs another
-/// ~`PLAY_ICON_GAP_PX + PLAY_ICON_SIZE_PX` and a touch of slack.
-const MIN_SIDE_PADDING: f32 = 40.0;
+/// Bumped 24 → 56 across #0024 (play) and #0025 (trash) to fit two
+/// hover-only gutter glyphs between the page edge and the dirty bar.
+/// Layout, left → right: play | gap | trash | gap | bar | gap | prose.
+const MIN_SIDE_PADDING: f32 = 56.0;
 const TOP_PADDING: f32 = 32.0;
 const BOTTOM_PADDING: f32 = 96.0;
 const LINE_HEIGHT_MULTIPLIER: f32 = 1.7;
@@ -37,10 +36,11 @@ const LINE_HEIGHT_MULTIPLIER: f32 = 1.7;
 const GUTTER_WIDTH_PX: f32 = 3.0;
 const GUTTER_GAP_PX: f32 = 8.0;
 
-/// Per-paragraph play button (#0024). The glyph paints in the left margin,
-/// just outside the dirty bar, and only when the paragraph is hovered.
-const PLAY_ICON_SIZE_PX: f32 = 14.0;
-const PLAY_ICON_GAP_PX: f32 = 6.0;
+/// Hover-only per-paragraph control glyphs (#0024 play, #0025 clear).
+/// `ICON_GAP_PX` is the spacing between adjacent icons and between the
+/// rightmost icon and the dirty bar.
+const ICON_SIZE_PX: f32 = 14.0;
+const ICON_GAP_PX: f32 = 6.0;
 
 /// Pipeline labels considered for the per-paragraph dirty gutter. Voice is
 /// chapter-level so it's excluded by design (#0023). Kept in sync with
@@ -257,20 +257,22 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 // transitions to yellow/orange/red read as state changes
                 // against a stable backdrop.
                 let mut play_clicked: Option<String> = None;
+                let mut clear_clicked: Option<String> = None;
                 if !paragraph_gutter_marks.is_empty() {
                     let gutter_x =
                         output.galley_pos.x - GUTTER_GAP_PX - GUTTER_WIDTH_PX * 0.5;
-                    let play_icon_x = output.galley_pos.x
-                        - GUTTER_GAP_PX
-                        - GUTTER_WIDTH_PX
-                        - PLAY_ICON_GAP_PX
-                        - PLAY_ICON_SIZE_PX * 0.5;
+                    let bar_left_edge =
+                        output.galley_pos.x - GUTTER_GAP_PX - GUTTER_WIDTH_PX;
+                    // Layout left→right: play | gap | trash | gap | bar.
+                    let trash_icon_x = bar_left_edge - ICON_GAP_PX - ICON_SIZE_PX * 0.5;
+                    let play_icon_x =
+                        trash_icon_x - ICON_SIZE_PX * 0.5 - ICON_GAP_PX - ICON_SIZE_PX * 0.5;
 
                     // Resolve the hovered paragraph by Y-band so the pointer
-                    // can sit in the gutter (or on the play glyph itself)
-                    // without dismissing the icon. The Y comparison happens
-                    // in galley-local space, then translates to the same
-                    // screen-space the painter uses.
+                    // can sit in the gutter (or on a glyph itself) without
+                    // dismissing the icons. Y comparison in galley-local
+                    // space; translates to the same screen-space the
+                    // painter uses.
                     let pointer_y_local = ui
                         .ctx()
                         .input(|i| i.pointer.hover_pos())
@@ -279,7 +281,8 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                     // First pass: paint the dirty bar for every paragraph
                     // (the constant scaffold from #0023). Y-band lookup is
                     // cheap enough to keep here; we reuse it in the second
-                    // pass for the hover icon so the math stays in one place.
+                    // pass for the hover icons so the math stays in one
+                    // place.
                     let painter = ui.painter().clone();
                     let mut hovered_idx: Option<usize> = None;
                     for (idx, (_id, state, (b_start, b_end))) in
@@ -305,11 +308,10 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         }
                     }
 
-                    // Second pass: paint the play glyph for the hovered
-                    // paragraph only, and register a click rect just over
-                    // the icon. We paint at the first line's Y, not the
-                    // whole band, so a long paragraph still gets a single
-                    // discreet glyph anchored at its start.
+                    // Second pass: paint play + trash for the hovered
+                    // paragraph only. Anchored at the paragraph's first
+                    // line so a long paragraph gets two discreet glyphs at
+                    // its top, not stretched along its height.
                     if let Some(idx) = hovered_idx {
                         let (id, _state, (b_start, _b_end)) = &paragraph_gutter_marks[idx];
                         let c_start = byte_to_char(&app.editor_text, *b_start);
@@ -317,16 +319,19 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         let y_first_top = output.galley_pos.y + top_rect.top();
                         let y_first_bot = output.galley_pos.y + top_rect.bottom();
                         let icon_y = (y_first_top + y_first_bot) * 0.5;
-                        let icon_rect = egui::Rect::from_center_size(
+                        let icon_size = egui::vec2(ICON_SIZE_PX + 4.0, ICON_SIZE_PX + 4.0);
+
+                        // Play glyph (#0024).
+                        let play_rect = egui::Rect::from_center_size(
                             egui::pos2(play_icon_x, icon_y),
-                            egui::vec2(PLAY_ICON_SIZE_PX + 4.0, PLAY_ICON_SIZE_PX + 4.0),
+                            icon_size,
                         );
                         let play_resp = ui.interact(
-                            icon_rect,
+                            play_rect,
                             Id::new(("paragraph-play", id.as_str())),
                             Sense::click(),
                         );
-                        let icon_color = if play_resp.hovered() {
+                        let play_color = if play_resp.hovered() {
                             theme::TEXT_PRIMARY
                         } else {
                             theme::TEXT_MUTED
@@ -335,16 +340,50 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                             egui::pos2(play_icon_x, icon_y),
                             Align2::CENTER_CENTER,
                             icons::PLAY,
-                            FontId::new(PLAY_ICON_SIZE_PX, family.clone()),
-                            icon_color,
+                            FontId::new(ICON_SIZE_PX, family.clone()),
+                            play_color,
                         );
                         if play_resp.clicked() {
                             play_clicked = Some(id.clone());
+                        }
+
+                        // Trash glyph (#0025): hard-clear all records for
+                        // this paragraph. No confirm — the suggestion
+                        // store is git-tracked, so a misfire is `git
+                        // checkout`-recoverable.
+                        let trash_rect = egui::Rect::from_center_size(
+                            egui::pos2(trash_icon_x, icon_y),
+                            icon_size,
+                        );
+                        let trash_resp = ui
+                            .interact(
+                                trash_rect,
+                                Id::new(("paragraph-clear", id.as_str())),
+                                Sense::click(),
+                            )
+                            .on_hover_text("Clear all flags for this paragraph");
+                        let trash_color = if trash_resp.hovered() {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_MUTED
+                        };
+                        ui.painter().text(
+                            egui::pos2(trash_icon_x, icon_y),
+                            Align2::CENTER_CENTER,
+                            icons::TRASH,
+                            FontId::new(ICON_SIZE_PX, family.clone()),
+                            trash_color,
+                        );
+                        if trash_resp.clicked() {
+                            clear_clicked = Some(id.clone());
                         }
                     }
                 }
                 if let Some(id) = play_clicked {
                     app.play_paragraph(&id);
+                }
+                if let Some(id) = clear_clicked {
+                    app.hard_clear_paragraph(&id);
                 }
 
                 // Hover detection: ask the rendered galley directly so wrapping is honoured.

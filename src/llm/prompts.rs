@@ -175,7 +175,41 @@ Rules:
 - If there are no mistakes, return {"flags": []}."#;
 
 pub fn build_user(prose: &str) -> String {
+    build_user_with_history(prose, &[])
+}
+
+/// Like [`build_user`] but with a "Already reviewed — do not flag again"
+/// section listing prior Dismissed / Accepted quotes for the same
+/// `(pipeline, paragraph_id)`. Used by per-paragraph runs (#0025) so the
+/// model stops re-raising deliberate stylistic choices and addressed
+/// edits on every play-button run. Empty `history` collapses to the
+/// plain `build_user` output, so chapter-level callers stay byte-identical.
+pub fn build_user_with_history(prose: &str, history: &[&str]) -> String {
     let mut s = String::new();
+    if !history.is_empty() {
+        s.push_str("## Already reviewed — do not flag again\n\n");
+        s.push_str(
+            "The author has already seen and resolved these quotes from the prose below. \
+             Treat them as deliberate or already addressed; do NOT include them in `flags`.\n\n",
+        );
+        for q in history {
+            // One line per quote; truncate aggressively-long quotes so the
+            // section can't dominate the prompt budget. The model only needs
+            // enough text to recognize the same observation.
+            let trimmed = q.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let preview: String = trimmed.chars().take(240).collect();
+            s.push_str("- ");
+            s.push_str(&preview);
+            if trimmed.chars().count() > 240 {
+                s.push('…');
+            }
+            s.push('\n');
+        }
+        s.push_str("\n---\n\n");
+    }
     s.push_str("```\n");
     s.push_str(prose);
     if !prose.ends_with('\n') {

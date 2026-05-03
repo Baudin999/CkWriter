@@ -155,6 +155,96 @@ pub fn id_hash(pipeline: &str, paragraph_id: Option<&str>, normalized_quote: &st
     h.finalize().to_hex().to_string()
 }
 
+/// Threshold for token-set Jaccard similarity (#0025). Hand-tuned against
+/// the `Ancient/Wua.json` regression: dismissed and re-flagged quotes that
+/// cover the same observation typically score ≥ 0.7 once one isn't a strict
+/// substring of the other; genuinely different observations land below.
+pub const FUZZY_JACCARD_THRESHOLD: f32 = 0.7;
+
+/// Fuzzy lookup: given an incoming flag, find the existing record id (if any)
+/// that covers the same observation. Used by `ingest_response` to avoid
+/// piling up parallel Proposed records when the model picks a different
+/// quote substring for a flag that's already Dismissed/Accepted/Proposed.
+///
+/// A record matches when scoped to the same `(pipeline, paragraph_id)` AND
+/// either:
+///  - one normalized quote is a substring of the other (catches the common
+///    "model returned a shorter span" case), OR
+///  - the token-set Jaccard score over normalized whitespace-split tokens
+///    meets `FUZZY_JACCARD_THRESHOLD` (catches reorderings and minor word
+///    edits).
+///
+/// Stale records are excluded — they're auto-swept tombstones, not deliberate
+/// writer decisions, and matching against them would silently swallow new
+/// flags on a paragraph the writer rewrote.
+///
+/// Returns the id of the highest-scoring match, ties broken by Jaccard then
+/// by lexicographic id (deterministic).
+pub fn fuzzy_match_record_id(
+    chapter: &ChapterSuggestions,
+    pipeline: &str,
+    paragraph_id: Option<&str>,
+    normalized_quote: &str,
+) -> Option<String> {
+    if normalized_quote.is_empty() {
+        return None;
+    }
+    let new_tokens: std::collections::HashSet<&str> =
+        normalized_quote.split_whitespace().collect();
+    if new_tokens.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(f32, &str)> = None;
+    for rec in chapter.records.values() {
+        if rec.status == Status::Stale {
+            continue;
+        }
+        if rec.pipeline != pipeline {
+            continue;
+        }
+        if rec.paragraph_id.as_deref() != paragraph_id {
+            continue;
+        }
+        let existing = rec.normalized_quote.as_str();
+        if existing.is_empty() {
+            continue;
+        }
+
+        let substring_match = existing.contains(normalized_quote)
+            || normalized_quote.contains(existing);
+        let existing_tokens: std::collections::HashSet<&str> =
+            existing.split_whitespace().collect();
+        let jaccard = if existing_tokens.is_empty() {
+            0.0
+        } else {
+            let intersection = new_tokens.intersection(&existing_tokens).count() as f32;
+            let union = new_tokens.union(&existing_tokens).count() as f32;
+            intersection / union
+        };
+
+        if substring_match || jaccard >= FUZZY_JACCARD_THRESHOLD {
+            // Substring matches always beat pure-Jaccard ones; among
+            // pure-Jaccard ties we keep the highest-scoring then the
+            // lexicographically-smallest id so the choice is stable across
+            // runs (BTreeMap iteration is sorted, but we still pin it
+            // explicitly because two records can have the same Jaccard).
+            let score = if substring_match { 1.0 } else { jaccard };
+            match best {
+                None => best = Some((score, rec.id.as_str())),
+                Some((bscore, bid)) => {
+                    let better = score > bscore
+                        || (score == bscore && rec.id.as_str() < bid);
+                    if better {
+                        best = Some((score, rec.id.as_str()));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, id)| id.to_string())
+}
+
 /// Sweep `Proposed` records: any whose anchored paragraph has been rewritten
 /// (or removed) becomes `Stale`. Returns `true` iff any record was changed,
 /// so callers can decide whether to persist.
@@ -364,6 +454,233 @@ mod tests {
         for rec in c.records.values() {
             assert_ne!(rec.status, Status::Stale);
         }
+    }
+
+    // --- fuzzy_match_record_id (#0025) -------------------------------------
+
+    fn rec_with(
+        id: &str,
+        pipeline: &str,
+        paragraph_id: Option<&str>,
+        quote: &str,
+        status: Status,
+    ) -> SuggestionRecord {
+        SuggestionRecord {
+            id: id.to_string(),
+            pipeline: pipeline.to_string(),
+            kind: String::new(),
+            paragraph_id: paragraph_id.map(|s| s.to_string()),
+            quote: quote.to_string(),
+            normalized_quote: normalize_quote(quote),
+            why: String::new(),
+            suggestion: String::new(),
+            status,
+            created_at: 1,
+            resolved_at: None,
+        }
+    }
+
+    fn store_with(records: Vec<SuggestionRecord>) -> ChapterSuggestions {
+        let mut c = ChapterSuggestions::default();
+        for r in records {
+            c.records.insert(r.id.clone(), r);
+        }
+        c
+    }
+
+    #[test]
+    fn fuzzy_match_returns_none_on_empty_store() {
+        let c = ChapterSuggestions::default();
+        let hit = fuzzy_match_record_id(&c, "prose", Some("p_x"), "anything");
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_returns_none_on_empty_quote() {
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            "the dog ran",
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(&c, "prose", Some("p_x"), "");
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_catches_strict_substring_of_existing() {
+        // Mirrors the real Wua.json regression: dismissed quote is a long
+        // sentence; the model re-ran and returned a strict substring of it.
+        let dismissed_quote =
+            "yet, others manage to escape it all, swirling through life while evading monotony and servitude.";
+        let new_quote = "swirling through life while evading monotony and servitude";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_2bd65496"),
+            dismissed_quote,
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_2bd65496"),
+            &normalize_quote(new_quote),
+        );
+        assert_eq!(hit.as_deref(), Some("h1"));
+    }
+
+    #[test]
+    fn fuzzy_match_catches_existing_substring_of_new() {
+        // Reverse: the model returned a longer span that contains the
+        // dismissed quote.
+        let dismissed = "swirling through life";
+        let new = "swirling through life while evading monotony";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            dismissed,
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_x"),
+            &normalize_quote(new),
+        );
+        assert_eq!(hit.as_deref(), Some("h1"));
+    }
+
+    #[test]
+    fn fuzzy_match_catches_token_jaccard_above_threshold() {
+        // Same observation, slightly different word order / punctuation —
+        // neither is a substring of the other, but token-set Jaccard is high.
+        let dismissed = "choking on their dust gasping for breath";
+        let new = "gasping for breath, choking on their dust";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            dismissed,
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_x"),
+            &normalize_quote(new),
+        );
+        assert_eq!(hit.as_deref(), Some("h1"));
+    }
+
+    #[test]
+    fn fuzzy_match_misses_below_jaccard_threshold() {
+        // Genuinely different observations — share a few common words but
+        // not enough to push Jaccard above 0.7 and no substring overlap.
+        let dismissed = "the moon hung low over the silent harbour";
+        let new = "the captain shouted orders from the bridge";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            dismissed,
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_x"),
+            &normalize_quote(new),
+        );
+        assert!(hit.is_none(), "low-overlap quotes must not match: got {hit:?}");
+    }
+
+    #[test]
+    fn fuzzy_match_scopes_to_pipeline() {
+        // Same paragraph, same quote, but a different pipeline's record —
+        // must not match (a prose flag and a spelling flag on the same words
+        // are different observations).
+        let q = "the dog ran across the field";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            q,
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "spelling",
+            Some("p_x"),
+            &normalize_quote(q),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_scopes_to_paragraph() {
+        // Same pipeline, same quote, different paragraph — must not match.
+        let q = "the dog ran across the field";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_a"),
+            q,
+            Status::Dismissed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_b"),
+            &normalize_quote(q),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_skips_stale_records() {
+        // Stale records are auto-swept tombstones — matching against them
+        // would silently swallow new flags on a paragraph the writer
+        // rewrote.
+        let q = "the dog ran across the field";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            q,
+            Status::Stale,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_x"),
+            &normalize_quote(q),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_matches_against_proposed_too() {
+        // Not just dismissed: an existing Proposed record from a prior
+        // partial run should also dedupe so we don't double-report.
+        let q1 = "the dog ran";
+        let q2 = "the dog ran fast across the field";
+        let c = store_with(vec![rec_with(
+            "h1",
+            "prose",
+            Some("p_x"),
+            q1,
+            Status::Proposed,
+        )]);
+        let hit = fuzzy_match_record_id(
+            &c,
+            "prose",
+            Some("p_x"),
+            &normalize_quote(q2),
+        );
+        assert_eq!(hit.as_deref(), Some("h1"));
     }
 
     #[test]
