@@ -1,5 +1,6 @@
 use crate::app::CkWriterApp;
 use crate::book::entity::EntityKind;
+use crate::book::paragraphs::Paragraph;
 use crate::extract::{self, EntityHit};
 use crate::llm::prompts::Pipeline;
 use crate::llm::revision::{FlagKind, Revision};
@@ -7,6 +8,7 @@ use crate::theme;
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::widgets::text_edit::TextEditState;
 use egui::{Color32, FontFamily, FontId, Id, RichText, Stroke};
+use std::collections::BTreeMap;
 
 /// Per-widget layout cache stored in `egui::Memory`. Keyed by the editor's
 /// `Id`; value type discriminates from `TextEditState` via `TypeId`. Lets the
@@ -23,6 +25,18 @@ const MIN_SIDE_PADDING: f32 = 24.0;
 const TOP_PADDING: f32 = 32.0;
 const BOTTOM_PADDING: f32 = 96.0;
 const LINE_HEIGHT_MULTIPLIER: f32 = 1.7;
+
+/// Width of the per-paragraph dirty gutter painted to the left of the editor
+/// column (#0023). Sits inside the column's left padding (`MIN_SIDE_PADDING`
+/// = 24 px), with `GUTTER_GAP_PX` of breathing room between the gutter and
+/// the prose.
+const GUTTER_WIDTH_PX: f32 = 3.0;
+const GUTTER_GAP_PX: f32 = 8.0;
+
+/// Pipeline labels considered for the per-paragraph dirty gutter. Voice is
+/// chapter-level so it's excluded by design (#0023). Kept in sync with
+/// `Pipeline::label`.
+const GUTTER_PIPELINE_LABELS: &[&str] = &["show, don't tell", "prose", "spelling"];
 
 fn editor_family() -> FontFamily {
     FontFamily::Name(theme::WRITER_FAMILY.into())
@@ -152,6 +166,26 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         None
     };
 
+    // Snapshot the per-paragraph gutter state before the closure takes a
+    // mutable borrow on `app.editor_text`. Each entry pairs the resolved
+    // state with the paragraph's `char_range` from the saved index — which
+    // may be stale relative to unsaved keystrokes by design (#0023): the
+    // gutter answers "what will the next coach run cost? what's pending?",
+    // a save-time question.
+    let paragraph_gutter_marks: Vec<(GutterState, (usize, usize))> = app
+        .current_chapter
+        .as_ref()
+        .map(|ch| {
+            app.current_paragraphs
+                .iter()
+                .map(|p| {
+                    let state = gutter_state_for(p, &ch.meta.last_run_hashes, &app.revisions);
+                    (state, p.char_range)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut scroll = egui::ScrollArea::vertical().auto_shrink([false; 2]);
     if let Some(off) = scroll_target {
         scroll = scroll.vertical_scroll_offset(off);
@@ -202,6 +236,37 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         output.galley_pos,
                     );
                     ui.scroll_to_rect(screen_rect, Some(egui::Align::Center));
+                }
+
+                // Paint per-paragraph state markers in the left margin
+                // (#0023). The gutter sits just outside the prose column,
+                // between the page padding and the first glyph — so it shares
+                // the column's scroll without competing with line-wrapped
+                // text. Pixel positions come from the laid-out galley, so
+                // wrapping is honoured automatically. Every paragraph paints,
+                // including Clean (gray) — the constant scaffold makes
+                // transitions to yellow/orange/red read as state changes
+                // against a stable backdrop.
+                if !paragraph_gutter_marks.is_empty() {
+                    let painter = ui.painter();
+                    let gutter_x =
+                        output.galley_pos.x - GUTTER_GAP_PX - GUTTER_WIDTH_PX * 0.5;
+                    for (state, (b_start, b_end)) in &paragraph_gutter_marks {
+                        let visible_end = b_end.saturating_sub(1).max(*b_start);
+                        let c_start = byte_to_char(&app.editor_text, *b_start);
+                        let c_end = byte_to_char(&app.editor_text, visible_end);
+                        let top_rect = output.galley.pos_from_ccursor(CCursor::new(c_start));
+                        let bot_rect = output.galley.pos_from_ccursor(CCursor::new(c_end));
+                        let y_top = output.galley_pos.y + top_rect.top();
+                        let y_bot = output.galley_pos.y + bot_rect.bottom();
+                        painter.line_segment(
+                            [
+                                egui::pos2(gutter_x, y_top),
+                                egui::pos2(gutter_x, y_bot),
+                            ],
+                            Stroke::new(GUTTER_WIDTH_PX, gutter_color(*state)),
+                        );
+                    }
                 }
 
                 // Hover detection: ask the rendered galley directly so wrapping is honoured.
@@ -396,6 +461,95 @@ fn char_to_byte(text: &str, char_index: usize) -> usize {
         .nth(char_index)
         .map(|(b, _)| b)
         .unwrap_or(text.len())
+}
+
+/// Convert a byte offset into `text` to its char index. Clamps to the buffer
+/// length and walks back to the previous char boundary so out-of-range or
+/// mid-codepoint offsets (a stale paragraph range outliving the buffer for a
+/// single frame after edit) collapse rather than panic.
+fn byte_to_char(text: &str, byte_offset: usize) -> usize {
+    let mut clamped = byte_offset.min(text.len());
+    while clamped > 0 && !text.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    text[..clamped].chars().count()
+}
+
+/// Per-paragraph signal painted in the editor's left margin (#0023). Priority:
+/// `HasIssues` overrides every other state, then the parse-status states are
+/// derived from the show/prose/spelling cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GutterState {
+    /// All three per-paragraph pipelines have cached this paragraph at the
+    /// current hash, and there are no active issues.
+    Clean,
+    /// The paragraph has never been seen by any of show/prose/spelling.
+    NeverParsed,
+    /// At least one of the three pipelines has cached this paragraph, but at
+    /// least one cached entry is missing or the hash no longer matches.
+    Changed,
+    /// At least one non-dismissed revision from show/prose/spelling is anchored
+    /// in this paragraph. Wins over the parse-status states because unresolved
+    /// feedback is the primary thing the gutter is supposed to surface.
+    HasIssues,
+}
+
+/// Resolve the gutter state for a single paragraph against the chapter's
+/// per-pipeline hash cache and the live revision list. Pure so the priority
+/// rules can be unit-tested without spinning up the app.
+///
+/// Voice is excluded from both legs by design: it runs chapter-level, not
+/// per-paragraph, so it doesn't have cache entries and its anchored flags
+/// don't belong on the per-paragraph signal.
+fn gutter_state_for(
+    paragraph: &Paragraph,
+    last_run_hashes: &BTreeMap<String, BTreeMap<String, String>>,
+    revisions: &[Revision],
+) -> GutterState {
+    let has_active_issue = revisions.iter().any(|r| {
+        !r.is_dismissed
+            && matches!(
+                r.pipeline,
+                Pipeline::ShowDontTell | Pipeline::Prose | Pipeline::Spelling
+            )
+            && r.paragraph_id.as_deref() == Some(paragraph.id.as_str())
+    });
+    if has_active_issue {
+        return GutterState::HasIssues;
+    }
+
+    let mut any_present = false;
+    let mut all_match = true;
+    for label in GUTTER_PIPELINE_LABELS {
+        match last_run_hashes.get(*label).and_then(|m| m.get(&paragraph.id)) {
+            Some(h) => {
+                any_present = true;
+                if h != &paragraph.hash {
+                    all_match = false;
+                }
+            }
+            None => {
+                all_match = false;
+            }
+        }
+    }
+
+    if !any_present {
+        GutterState::NeverParsed
+    } else if all_match {
+        GutterState::Clean
+    } else {
+        GutterState::Changed
+    }
+}
+
+fn gutter_color(state: GutterState) -> Color32 {
+    match state {
+        GutterState::Clean => theme::GUTTER_CLEAN,
+        GutterState::NeverParsed => theme::GUTTER_NEVER_PARSED,
+        GutterState::Changed => theme::GUTTER_CHANGED,
+        GutterState::HasIssues => theme::GUTTER_HAS_ISSUES,
+    }
 }
 
 /// Stable label for `FontFamily` fingerprinting. Family is `'static` per
@@ -700,5 +854,249 @@ mod tests {
             wrap_width: 600.0,
         };
         assert_eq!(layout_fingerprint(&inp), layout_fingerprint(&inp));
+    }
+
+    // --- Dirty gutter (#0023) ----------------------------------------------
+
+    use crate::book::paragraphs::parse_and_match;
+
+    fn long_para(seed: &str) -> String {
+        format!("{seed} this is a long paragraph with plenty of text to support the splitter and avoid the short-paragraph fallback path entirely.")
+    }
+
+    /// Build a chapter with three long paragraphs and return the parsed
+    /// paragraph index. Hashes are deterministic across calls so tests can
+    /// populate the cache straight from the parsed list.
+    fn three_para_chapter() -> Vec<Paragraph> {
+        let p_a = long_para("Alpha");
+        let p_b = long_para("Beta");
+        let p_c = long_para("Gamma");
+        let text = format!("{p_a}\n\n{p_b}\n\n{p_c}\n");
+        parse_and_match(&text, &[])
+    }
+
+    fn full_cache_for(paragraphs: &[Paragraph]) -> BTreeMap<String, String> {
+        paragraphs
+            .iter()
+            .map(|p| (p.id.clone(), p.hash.clone()))
+            .collect()
+    }
+
+    fn three_label_cache(
+        paragraphs: &[Paragraph],
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        let mut out = BTreeMap::new();
+        let cached = full_cache_for(paragraphs);
+        out.insert("show, don't tell".into(), cached.clone());
+        out.insert("prose".into(), cached.clone());
+        out.insert("spelling".into(), cached);
+        out
+    }
+
+    fn revision_anchored_in(
+        id: u32,
+        pipeline: Pipeline,
+        paragraph_id: &str,
+        is_dismissed: bool,
+    ) -> Revision {
+        Revision {
+            id,
+            pipeline,
+            kind: FlagKind::Other,
+            quote: "q".to_string(),
+            why: "w".to_string(),
+            suggestion: "s".to_string(),
+            anchor: Some((0, 1)),
+            suggestion_id: format!("sid-{id}"),
+            paragraph_id: Some(paragraph_id.to_string()),
+            is_dismissed,
+        }
+    }
+
+    fn states_for(
+        paragraphs: &[Paragraph],
+        cache: &BTreeMap<String, BTreeMap<String, String>>,
+        revisions: &[Revision],
+    ) -> Vec<GutterState> {
+        paragraphs
+            .iter()
+            .map(|p| gutter_state_for(p, cache, revisions))
+            .collect()
+    }
+
+    #[test]
+    fn empty_cache_marks_every_paragraph_never_parsed() {
+        let paragraphs = three_para_chapter();
+        let states = states_for(&paragraphs, &BTreeMap::new(), &[]);
+        assert!(
+            states.iter().all(|s| *s == GutterState::NeverParsed),
+            "fresh chapter should be all NeverParsed: {states:?}"
+        );
+    }
+
+    #[test]
+    fn full_cache_across_three_pipelines_marks_clean() {
+        let paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        let states = states_for(&paragraphs, &cache, &[]);
+        assert!(
+            states.iter().all(|s| *s == GutterState::Clean),
+            "fully cached chapter should be all Clean: {states:?}"
+        );
+    }
+
+    #[test]
+    fn partial_pipeline_coverage_marks_changed_not_never_parsed() {
+        // Only prose has been run. show/spelling caches are absent — so the
+        // paragraphs *have* been parsed (by one pipeline) but not by the
+        // others. They should read as Changed, not NeverParsed: a coach run
+        // happened, but the union isn't satisfied.
+        let paragraphs = three_para_chapter();
+        let mut cache: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        cache.insert("prose".into(), full_cache_for(&paragraphs));
+        let states = states_for(&paragraphs, &cache, &[]);
+        assert!(
+            states.iter().all(|s| *s == GutterState::Changed),
+            "partial cache should be all Changed: {states:?}"
+        );
+    }
+
+    #[test]
+    fn voice_cache_does_not_satisfy_any_state() {
+        // Voice runs chapter-level; populating its label shouldn't shift any
+        // paragraph off NeverParsed.
+        let paragraphs = three_para_chapter();
+        let mut cache: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        cache.insert("voice".into(), full_cache_for(&paragraphs));
+        let states = states_for(&paragraphs, &cache, &[]);
+        assert!(
+            states.iter().all(|s| *s == GutterState::NeverParsed),
+            "voice-only cache should still be NeverParsed: {states:?}"
+        );
+    }
+
+    #[test]
+    fn stale_hash_in_one_pipeline_marks_changed() {
+        let paragraphs = three_para_chapter();
+        let mut cache = three_label_cache(&paragraphs);
+        // Corrupt prose's cached hash for the middle paragraph: simulates the
+        // writer editing+saving the paragraph since the last prose run.
+        let mid_id = paragraphs[1].id.clone();
+        cache
+            .get_mut("prose")
+            .expect("prose label seeded")
+            .insert(mid_id, "deadbeefdeadbeef".to_string());
+        let states = states_for(&paragraphs, &cache, &[]);
+        assert_eq!(states[0], GutterState::Clean);
+        assert_eq!(states[1], GutterState::Changed);
+        assert_eq!(states[2], GutterState::Clean);
+    }
+
+    #[test]
+    fn one_paragraph_missing_in_one_pipeline_marks_changed() {
+        let paragraphs = three_para_chapter();
+        let mut cache = three_label_cache(&paragraphs);
+        let mid_id = paragraphs[1].id.clone();
+        cache.get_mut("spelling").expect("spelling seeded").remove(&mid_id);
+        let states = states_for(&paragraphs, &cache, &[]);
+        assert_eq!(states[0], GutterState::Clean);
+        assert_eq!(states[1], GutterState::Changed);
+        assert_eq!(states[2], GutterState::Clean);
+    }
+
+    #[test]
+    fn active_issue_overrides_clean() {
+        let paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        let mid_id = paragraphs[1].id.clone();
+        let revs = vec![revision_anchored_in(1, Pipeline::Prose, &mid_id, false)];
+        let states = states_for(&paragraphs, &cache, &revs);
+        assert_eq!(states[0], GutterState::Clean);
+        assert_eq!(states[1], GutterState::HasIssues);
+        assert_eq!(states[2], GutterState::Clean);
+    }
+
+    #[test]
+    fn active_issue_overrides_changed_and_never_parsed() {
+        // HasIssues is the highest-priority state; a paragraph with an active
+        // revision is red regardless of its parse status.
+        let paragraphs = three_para_chapter();
+        let mid_id = paragraphs[1].id.clone();
+        let revs = vec![revision_anchored_in(1, Pipeline::Spelling, &mid_id, false)];
+        // Empty cache → would otherwise be NeverParsed.
+        let states = states_for(&paragraphs, &BTreeMap::new(), &revs);
+        assert_eq!(states[1], GutterState::HasIssues);
+    }
+
+    #[test]
+    fn dismissed_issue_does_not_override() {
+        let paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        let mid_id = paragraphs[1].id.clone();
+        let revs = vec![revision_anchored_in(1, Pipeline::Prose, &mid_id, true)];
+        let states = states_for(&paragraphs, &cache, &revs);
+        assert!(
+            states.iter().all(|s| *s == GutterState::Clean),
+            "dismissed-only revision should not push to HasIssues: {states:?}"
+        );
+    }
+
+    #[test]
+    fn voice_revision_does_not_override() {
+        // Voice issues anchor in paragraphs but they're chapter-level
+        // semantically; the gutter ignores them.
+        let paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        let mid_id = paragraphs[1].id.clone();
+        let revs = vec![revision_anchored_in(1, Pipeline::Voice, &mid_id, false)];
+        let states = states_for(&paragraphs, &cache, &revs);
+        assert!(
+            states.iter().all(|s| *s == GutterState::Clean),
+            "voice revision should not push to HasIssues: {states:?}"
+        );
+    }
+
+    #[test]
+    fn unrelated_paragraph_id_does_not_propagate_issue() {
+        let paragraphs = three_para_chapter();
+        let cache = three_label_cache(&paragraphs);
+        // A revision anchored to a paragraph_id that doesn't match any current
+        // paragraph (e.g. a stale record from before a paragraph was deleted).
+        let revs = vec![revision_anchored_in(
+            1,
+            Pipeline::Prose,
+            "p_deadbeef",
+            false,
+        )];
+        let states = states_for(&paragraphs, &cache, &revs);
+        assert!(
+            states.iter().all(|s| *s == GutterState::Clean),
+            "stray revision must not turn any paragraph red: {states:?}"
+        );
+    }
+
+    // --- byte_to_char ------------------------------------------------------
+
+    #[test]
+    fn byte_to_char_maps_ascii_one_to_one() {
+        assert_eq!(byte_to_char("hello", 0), 0);
+        assert_eq!(byte_to_char("hello", 3), 3);
+        assert_eq!(byte_to_char("hello", 5), 5);
+    }
+
+    #[test]
+    fn byte_to_char_clamps_past_eof() {
+        assert_eq!(byte_to_char("hi", 99), 2);
+    }
+
+    #[test]
+    fn byte_to_char_handles_multibyte_codepoints() {
+        // "é" is 2 bytes in UTF-8.
+        let s = "café";
+        assert_eq!(byte_to_char(s, 0), 0);
+        assert_eq!(byte_to_char(s, 3), 3); // start of "é"
+        assert_eq!(byte_to_char(s, 5), 4); // after "é"
+        // Mid-codepoint byte (4) snaps back to the previous boundary (3).
+        assert_eq!(byte_to_char(s, 4), 3);
     }
 }

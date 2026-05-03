@@ -19,6 +19,23 @@ pub const REVISION_PUNCTUATION: Color32 = Color32::from_rgb(0xf7, 0xa8, 0x6a);
 pub const REVISION_GRAMMAR: Color32 = Color32::from_rgb(0xa8, 0xc8, 0x7a);
 pub const REVISION_SELECTED_BG: Color32 = Color32::from_rgb(0x33, 0x2c, 0x2c);
 
+// --- Editor per-paragraph state gutter (#0023) ----------------------------
+// Four states with priority HasIssues > NeverParsed | Changed > Clean. Tones
+// chosen to be distinguishable on the dark editor page (`EDITOR_PAGE`) while
+// staying calm enough to read as ambient state, not alert. The hue ordering
+// (yellow → orange → red) intentionally mirrors familiar status conventions
+// so the writer can scan the margin at a glance.
+/// Paragraph the model has never seen.
+pub const GUTTER_NEVER_PARSED: Color32 = Color32::from_rgb(0xc8, 0xa8, 0x55);
+/// Paragraph that was parsed, then edited since.
+pub const GUTTER_CHANGED: Color32 = Color32::from_rgb(0xd0, 0x88, 0x4a);
+/// Paragraph carries one or more unresolved revisions from the per-paragraph
+/// pipelines (show/prose/spelling). Highest-priority gutter color.
+pub const GUTTER_HAS_ISSUES: Color32 = Color32::from_rgb(0xd0, 0x55, 0x55);
+/// Paragraph parsed by all three per-paragraph pipelines, no drift, no
+/// active issues. The quiet baseline tone.
+pub const GUTTER_CLEAN: Color32 = Color32::from_rgb(0x55, 0x55, 0x5d);
+
 pub const DIFF_REMOVED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
 pub const DIFF_INSERTED: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const DIFF_CHANGED: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
