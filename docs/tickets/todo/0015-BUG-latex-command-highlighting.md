@@ -39,3 +39,23 @@ The writer is using these constantly while drafting and cannot tell at a glance 
 - "Word boundary" here means: end-of-string OR next char is not in `[A-Za-z0-9]` (LaTeX commands are a backslash followed by letters; `\nl1` would be a different command, not `\nl`).
 - The shared pink color belongs in `src/theme.rs` next to the other entity colors so a future palette tweak hits all sites at once.
 - Spans Vec is already sorted in `build_layout_job`; new LaTeX spans just get pushed in alongside the existing entity/revision spans. Italic for `\emph` content is set on the `TextFormat` via `font_id` family/style.
+
+## Status notes
+Parked 2026-05-03 after exploration only — no code written, working tree clean.
+
+Key facts gathered (so tomorrow doesn't re-explore):
+- The function the ticket calls `build_layout_job` is actually `build_job` at `src/ui/editor.rs:599`. Not at line ~285 — that area is the gutter/hover painter from #0023/#0024/#0025.
+- Layer model lives at `src/ui/editor.rs:565-580`: `enum LayerKind { Entity, Revision }` and `struct Layer { start, end, color, kind, priority, selected }`. Atomic-boundary algorithm (lines 676-742) is what we extend.
+- Current priorities: Entity = 0, unselected revision = 100..=103 (`100 + pipeline_byte`), selected = 255. For LaTeX-command-color-loses-to-entity, bump Entity to e.g. 50 and put `LatexCommand` at 0 (or any value < Entity, > 0 for clarity).
+- Italic is **a `TextFormat` field**, not a font-family swap: `pub italics: bool` at `epaint-0.31.1/src/text/text_layout_types.rs:275`. So `\emph{...}` content italic is just `fmt.italics = true` — additive, doesn't fight entity color or revision underline. The "design notes" line in this ticket suggesting `font_id` family/style is wrong; use the bool.
+- Theme colors live at `src/theme.rs`. Entity colors are at lines 12-13. Add `THEME_LATEX_COMMAND` (pink) there. There is no existing pink in the file — pick `Color32::from_rgb(0xf7, 0x6a, 0xc8)` or similar warm pink that reads on `EDITOR_PAGE` (#1c1c20). Confirm contrast before committing.
+- Test pattern to follow: `run_build_job` helper at `src/ui/editor.rs:1450` and the three `#[test]`s after it (`overlapping_revisions_both_contribute_formatting`, etc.) — they assert on `job.sections[i].format.{color,underline.color,background,italics}`. Mirror that style for the new tests.
+- Fingerprint at `layout_fingerprint` (line 915) hashes only text + hits + revisions + selected + font/wrap. **LaTeX commands are derived purely from `text`**, so the fingerprint already covers them — no fingerprint change needed.
+
+Plan to execute tomorrow:
+1. Add `LATEX_COMMAND` pink to `src/theme.rs`.
+2. Add `LayerKind::LatexCommand` and renumber priorities so Entity > LatexCommand.
+3. Write `fn latex_layers(text: &str) -> (Vec<Layer>, Vec<(usize,usize)>)` returning command-color spans + italic byte ranges; linear scan for `\nl`, `\switch`, `\emph{`, with word-boundary check (next char not in `[A-Za-z0-9]`) and same-paragraph brace match (stop at `\n` or end).
+4. In `build_job`, push the LatexCommand layers into `layers` and apply italic by checking each sub-range's midpoint against the italic ranges, setting `fmt.italics = true` additively.
+5. Tests: `\nl` pink; `\switch` pink; `\emph{hello}` braces pink + italic content; `\n1` and `\Switch` not highlighted; missing `}` → no span; entity inside `\emph{...}` keeps entity color + italic; revision underline survives over `\nl`.
+6. `cargo clippy && cargo test` — must be 0/0.
