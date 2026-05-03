@@ -44,12 +44,12 @@ Both are author-side annotations the AI consumes; neither exists today.
 - Note-orphaning UX when a paragraph's id rotates (a content edit big enough to defeat Jaccard 0.5). v1 accepts the trade-off; rebind is a follow-up if it bites.
 
 ## Acceptance criteria
-- [ ] Editable per-paragraph notes textbox visible in the scope panel for the focused paragraph; edits enter dirty state; Save persists to `ChapterMeta`; revert restores last-saved value.
-- [ ] After Save, the next coach run on that paragraph includes the note in the rendered prompt under `## Author guidance for this paragraph`.
-- [ ] Each Dismissed coach card shows a textbox + Save for the dismissal reason; edits enter dirty state; Save persists to the chapter suggestion store.
-- [ ] After Save, the next coach run on that paragraph includes the dismissal note alongside its quote in the "Already reviewed" section.
-- [ ] `paragraph_notes` (on `ChapterMeta`) and `dismissal_note` (on `SuggestionRecord`) round-trip through their respective JSON files; legacy files (no field) deserialize as empty / None.
-- [ ] `cargo clippy --all-targets -- -D warnings` and `cargo test` clean.
+- [x] Editable per-paragraph notes textbox visible in the scope panel for the focused paragraph; edits enter dirty state; Save persists to `ChapterMeta`; revert restores last-saved value. _(writer-confirmed 2026-05-03)_
+- [x] After Save, the next coach run on that paragraph includes the note in the rendered prompt under `## Author guidance for this paragraph`. _(writer-confirmed 2026-05-03; pinned by `paragraph_note_renders_above_already_reviewed` in `src/llm/prompts.rs`)_
+- [x] Each Dismissed coach card shows a textbox + Save for the dismissal reason; edits enter dirty state; Save persists to the chapter suggestion store. _(writer-confirmed 2026-05-03)_
+- [x] After Save, the next coach run on that paragraph includes the dismissal note alongside its quote in the "Already reviewed" section. _(writer-confirmed 2026-05-03; pinned by `dismissal_note_renders_alongside_quote` in `src/llm/prompts.rs`)_
+- [x] `paragraph_notes` (on `ChapterMeta`) and `dismissal_note` (on `SuggestionRecord`) round-trip through their respective JSON files; legacy files (no field) deserialize as empty / None. _(round-trip + legacy-load tests in `src/book/chapter_meta.rs` and `src/book/suggestions.rs`)_
+- [x] `cargo clippy --all-targets -- -D warnings` and `cargo test` clean. _(174 passed, 0 warnings)_
 
 ## Design notes
 - Both note paths reuse the forms framework (draft + dirty + explicit Save, no autosave, no Cmd+S). Matches the writer's standing preference and protects long textboxes from saving mid-typo.
