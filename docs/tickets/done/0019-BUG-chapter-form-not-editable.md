@@ -51,18 +51,18 @@ Build a small forms framework that every form surface above uses, then migrate t
 - "Don't ask again this session" on the discard prompt — file later if it gets annoying.
 
 ## Acceptance criteria
-- [ ] `src/ui/forms.rs` contains the `Form<T>` framework; the chapter info form, entity inspector, relation editor, and grid field helper all consume it.
-- [ ] Chapter info form shows a visible dirty indicator near its title when any of summary / goals / plot_notes differs from the saved value.
-- [ ] Chapter info form Save button persists summary / goals / plot_notes and clears dirty; Revert discards the draft and clears dirty.
-- [ ] Entity inspector Save and Revert behave identically to today (commit closure preserves rename ripples and relation updates).
-- [ ] Switching chapters with a dirty chapter form blocks on a modal "You have unsaved changes. Discard?" prompt; Cancel keeps the user on the current chapter with draft intact; Discard drops the draft and switches.
-- [ ] Same prompt fires on entity selection change with the inspector dirty.
-- [ ] Same prompt fires on book close and app close with any form dirty.
-- [ ] After typing into a chapter field and triggering anything that previously reseeded `chapter_draft`, either the typed value is preserved or the user sees the discard prompt — never silent reversion.
-- [ ] Read-only stats (`word_count`, `voice_score`, `last_coached_at`) on the chapter form do not drift from the editable fields.
-- [ ] `Cmd+S` no longer references form drafts; the form Save button is the only commit path for forms.
-- [ ] Dead code removed: `ChapterDraft`, `seed_chapter_draft`, `save_chapter_draft`, `app.chapter_draft`, `app.entity_dirty`, the lift/mutate block at `inspector.rs:41-48` (or whatever fully replaces them).
-- [ ] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+- [x] `src/ui/forms.rs` contains the `Form<T>` framework; the chapter info form, entity inspector, relation editor, and grid field helper all consume it.
+- [x] Chapter info form shows a visible dirty indicator near its title when any of summary / goals / plot_notes differs from the saved value.
+- [x] Chapter info form Save button persists summary / goals / plot_notes and clears dirty; Revert discards the draft and clears dirty.
+- [x] Entity inspector Save and Revert behave identically to today (commit closure preserves rename ripples and relation updates).
+- [x] Switching chapters with a dirty chapter form blocks on a modal "You have unsaved changes. Discard?" prompt; Cancel keeps the user on the current chapter with draft intact; Discard drops the draft and switches.
+- [x] Same prompt fires on entity selection change with the inspector dirty.
+- [x] Same prompt fires on book close and app close with any form dirty.
+- [x] After typing into a chapter field and triggering anything that previously reseeded `chapter_draft`, either the typed value is preserved or the user sees the discard prompt — never silent reversion.
+- [x] Read-only stats (`word_count`, `voice_score`, `last_coached_at`) on the chapter form do not drift from the editable fields.
+- [x] `Cmd+S` no longer references form drafts; the form Save button is the only commit path for forms.
+- [x] Dead code removed: `ChapterDraft`, `seed_chapter_draft`, `save_chapter_draft`, `app.chapter_draft`, `app.entity_dirty`, the lift/mutate block at `inspector.rs:41-48` (or whatever fully replaces them).
+- [x] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
 
 ## Design notes
 - `Form<T>` lifetime = while the surface is open. Construct with `Form::new(live: &T)` on first render, store on app state keyed by surface, drop on close. Each frame the surface re-asserts the live value via a method like `Form::rebase_if_clean(live: &T)` — a no-op if dirty (so the discard prompt is the only way to lose work) and a copy-from-live if clean (so external updates flow in).

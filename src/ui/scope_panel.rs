@@ -426,7 +426,7 @@ fn personae_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                             for r in in_bucket {
                                 let sel = selected_id.as_deref() == Some(r.id.as_str());
                                 if master_row(ui, sel, r) {
-                                    app.selected_entity = Some(r.id.clone());
+                                    app.request_select_entity(Some(r.id.clone()));
                                 }
                             }
                             ui.add_space(4.0);
@@ -435,7 +435,7 @@ fn personae_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                         for r in &rows {
                             let sel = selected_id.as_deref() == Some(r.id.as_str());
                             if master_row(ui, sel, r) {
-                                app.selected_entity = Some(r.id.clone());
+                                app.request_select_entity(Some(r.id.clone()));
                             }
                         }
                     }
@@ -505,7 +505,7 @@ fn cast_tab(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                     for r in &rows {
                         let sel = selected_id.as_deref() == Some(r.id.as_str());
                         if master_row(ui, sel, r) {
-                            app.selected_entity = Some(r.id.clone());
+                            app.request_select_entity(Some(r.id.clone()));
                         }
                     }
                 });
@@ -779,7 +779,7 @@ fn location_row(app: &mut CkWriterApp, ui: &mut egui::Ui, id: &str, count: Optio
     };
     let is_selected = app.selected_entity.as_deref() == Some(id);
     if ui.selectable_label(is_selected, label).clicked() {
-        app.selected_entity = Some(id.to_string());
+        app.request_select_entity(Some(id.to_string()));
     }
 }
 
@@ -1224,97 +1224,80 @@ fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
 }
 
 fn show_chapter(app: &mut CkWriterApp, ui: &mut egui::Ui) {
-    if app.current_chapter.is_none() {
+    let Some(live) = app.current_chapter.as_ref().map(|c| c.meta.clone()) else {
         ui.label(RichText::new("Open a chapter first.").color(theme::TEXT_MUTED));
         return;
-    }
-    if app.chapter_draft.is_none() {
-        // Defensive: open_chapter should always have seeded a draft, but if
-        // we reach the panel without one (e.g. after a future code path
-        // forgets to call seed_chapter_draft), do it lazily here so the
-        // writer doesn't see a blank tab.
-        app.seed_chapter_draft();
-    }
-    let read_only_meta = app
-        .current_chapter
-        .as_ref()
-        .map(|c| c.meta.clone())
-        .unwrap_or_default();
+    };
 
-    egui::ScrollArea::vertical()
+    // Detach the form from app so the body closure has free access to the
+    // rest of `app`. Lazily seed on first render; rebase the snapshot from
+    // the live ChapterMeta while clean so external updates (e.g. word_count
+    // recompute on save) flow in without prompting the user.
+    let mut form = app
+        .chapter_form
+        .take()
+        .unwrap_or_else(|| crate::ui::forms::Form::new(&live));
+    form.rebase_if_clean(&live);
+
+    let action = egui::ScrollArea::vertical()
         .id_salt("chapter-tab-scroll")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
-            let Some(draft) = app.chapter_draft.as_mut() else {
-                return;
-            };
-            let mut changed = false;
-
-            ui.label(
-                RichText::new("summary")
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            );
-            if ui
-                .add(
+            crate::ui::forms::render(&mut form, "Chapter info", ui, |ui, draft| {
+                ui.label(
+                    RichText::new("summary")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add(
                     egui::TextEdit::multiline(&mut draft.summary)
                         .desired_rows(2)
                         .desired_width(f32::INFINITY)
                         .hint_text("one or two sentences — what happens in this chapter"),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            ui.add_space(6.0);
+                );
+                ui.add_space(6.0);
 
-            ui.label(RichText::new("goals").small().color(theme::TEXT_MUTED));
-            if ui
-                .add(
+                ui.label(RichText::new("goals").small().color(theme::TEXT_MUTED));
+                ui.add(
                     egui::TextEdit::multiline(&mut draft.goals)
                         .desired_rows(2)
                         .desired_width(f32::INFINITY)
                         .hint_text("what this chapter needs to accomplish"),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            ui.add_space(6.0);
+                );
+                ui.add_space(6.0);
 
-            ui.label(
-                RichText::new("plot notes / scratchpad")
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            );
-            if ui
-                .add(
+                ui.label(
+                    RichText::new("plot notes / scratchpad")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add(
                     egui::TextEdit::multiline(&mut draft.plot_notes)
                         .desired_rows(10)
                         .desired_width(f32::INFINITY)
                         .hint_text("free-form notes — discovery writing, beats, reminders"),
-                )
-                .changed()
-            {
-                changed = true;
-            }
-            if changed {
-                draft.dirty = true;
-            }
+                );
 
-            ui.add_space(8.0);
-            let dirty = draft.dirty;
-            if ui
-                .add_enabled(dirty, egui::Button::new("Save chapter info"))
-                .clicked()
-            {
-                app.save_chapter_draft();
-            }
+                ui.add_space(10.0);
+                ui.separator();
+                // Render stats off the form's own draft so the editable
+                // fields and read-only stats are guaranteed to share one
+                // generation of state — no drift.
+                chapter_readonly_stats(ui, draft);
+            })
+        })
+        .inner;
 
-            ui.add_space(10.0);
-            ui.separator();
-            chapter_readonly_stats(ui, &read_only_meta);
-        });
+    app.chapter_form = Some(form);
+    match action {
+        crate::ui::forms::FormAction::Save => app.save_chapter_form(),
+        crate::ui::forms::FormAction::Revert => {
+            if let Some(f) = app.chapter_form.as_mut() {
+                f.revert();
+            }
+        }
+        crate::ui::forms::FormAction::None => {}
+    }
 }
 
 fn chapter_readonly_stats(ui: &mut egui::Ui, meta: &crate::book::chapter_meta::ChapterMeta) {

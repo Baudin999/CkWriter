@@ -35,8 +35,9 @@ impl super::CkWriterApp {
         self.selected_revision = None;
         self.dirty = false;
         self.selected_entity = None;
-        self.entity_dirty = None;
-        self.chapter_draft = None;
+        self.entity_form = None;
+        self.chapter_form = None;
+        self.pending_nav = None;
         self.char_stream = None;
         self.last_char_buffer = None;
         self.char_proposals.clear();
@@ -127,7 +128,13 @@ impl super::CkWriterApp {
                 self.diff_scroll_y = 0.0;
                 self.settings.last_chapter = Some(path.to_path_buf());
                 let _ = self.settings.save();
-                self.seed_chapter_draft();
+                // The chapter just changed — drop the previous chapter
+                // form so the Chapter tab re-seeds against the new
+                // chapter's metadata on its next render. The shared discard
+                // prompt has already gated the dirty case before we reach
+                // here.
+                self.chapter_form = None;
+                self.refresh_chapter_paragraph_index();
                 // Rehydrate the panel from the suggestion store BEFORE any
                 // pipeline can run (acceptance criterion). Auto-stale fires
                 // first so dismissed-since-rewrite cards get the right pill.
@@ -226,7 +233,11 @@ impl super::CkWriterApp {
             .find(|c| c.folder == entry.folder && c.name == entry.name)
             .map(|c| c.file_path.clone());
         if let Some(p) = target_path {
-            self.open_chapter(&p);
+            // Route through `request_open_chapter` so a dirty chapter form
+            // doesn't get silently clobbered when the user creates a new
+            // chapter. The new chapter is already on disk; the user can
+            // navigate to it later if they cancel the discard prompt.
+            self.request_open_chapter(p);
         }
         Ok(())
     }
@@ -398,33 +409,19 @@ impl super::CkWriterApp {
         }
     }
 
-    /// Initialise (or replace) the chapter-tab draft from the current
-    /// chapter's saved metadata, and rebuild `current_paragraphs` from the
-    /// open file. Called whenever the active chapter changes — any unsaved
-    /// edits in the previous draft are discarded, mirroring how the legacy
-    /// `.notes.md` scratchpad worked.
-    pub fn seed_chapter_draft(&mut self) {
+    /// Rebuild `current_paragraphs` from the open editor buffer against the
+    /// current chapter's stored paragraph index. If the file's been edited
+    /// outside the app (or this is the first open after adding the field),
+    /// the result differs — persist it so future opens see a stable index.
+    /// Called whenever the active chapter changes.
+    pub fn refresh_chapter_paragraph_index(&mut self) {
         let Some(ch) = self.current_chapter.as_ref() else {
-            self.chapter_draft = None;
             self.current_paragraphs.clear();
             return;
         };
         let folder = ch.folder.clone();
         let name = ch.name.clone();
         let prior_meta = ch.meta.paragraphs.clone();
-        self.chapter_draft = Some(crate::app::ChapterDraft {
-            folder: folder.clone(),
-            name: name.clone(),
-            summary: ch.meta.summary.clone(),
-            goals: ch.meta.goals.clone(),
-            plot_notes: ch.meta.plot_notes.clone(),
-            dirty: false,
-        });
-
-        // Build the runtime paragraph index against the on-disk index. If the
-        // file's been edited outside the app (or this is the first open after
-        // adding the field), the result will differ — persist it so future
-        // opens see a stable index.
         let parsed = paragraphs::parse_and_match_meta(&self.editor_text, &prior_meta);
         let needs_save = paragraphs::differs(&parsed, &prior_meta);
         let new_meta: Vec<ParagraphMeta> = parsed.iter().map(|p| p.meta()).collect();
@@ -434,28 +431,32 @@ impl super::CkWriterApp {
         }
     }
 
-    /// Persist the chapter-tab draft into the chapter's metadata file. No-op
-    /// if there is no draft, no current chapter, or the draft belongs to a
-    /// different chapter than the one currently open (defensive — happens if
-    /// chapter switching races with a save shortcut).
-    pub fn save_chapter_draft(&mut self) {
-        let Some(draft) = self.chapter_draft.clone() else {
+    /// Persist the editable subset of the chapter form's draft to the
+    /// chapter's metadata sidecar, then mark the form as saved. The draft
+    /// also carries `word_count`, `voice_score`, etc. — we deliberately do
+    /// **not** write those back, since they're owned by other paths
+    /// (`save_chapter`, the voice pipeline) and would clobber fresher values
+    /// otherwise.
+    pub fn save_chapter_form(&mut self) {
+        let Some(form) = self.chapter_form.as_ref() else {
             return;
         };
-        let cur_matches = self
-            .current_chapter
-            .as_ref()
-            .is_some_and(|c| c.folder == draft.folder && c.name == draft.name);
-        if !cur_matches {
+        let draft = form.draft().clone();
+        let Some(ch) = self.current_chapter.as_ref() else {
+            return;
+        };
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        if folder.is_empty() || name.is_empty() {
             return;
         }
-        self.update_chapter_meta(&draft.folder, &draft.name, |m| {
+        self.update_chapter_meta(&folder, &name, |m| {
             m.summary = draft.summary.clone();
             m.goals = draft.goals.clone();
             m.plot_notes = draft.plot_notes.clone();
         });
-        if let Some(d) = self.chapter_draft.as_mut() {
-            d.dirty = false;
+        if let Some(f) = self.chapter_form.as_mut() {
+            f.mark_saved();
         }
     }
 
@@ -488,8 +489,13 @@ impl super::CkWriterApp {
             .map(|c| c.file_path != file)
             .unwrap_or(true);
         if needs_open {
-            self.open_chapter(file);
+            // Stage the scroll target on the pending nav so it survives
+            // the discard prompt and is applied alongside the chapter open.
+            // If the user cancels the prompt, no scroll fires either —
+            // the line would otherwise apply against the wrong chapter.
+            self.request_open_chapter_at_line(file.to_path_buf(), line);
+        } else {
+            self.pending_scroll_line = Some(line.saturating_sub(1) as usize);
         }
-        self.pending_scroll_line = Some(line.saturating_sub(1) as usize);
     }
 }

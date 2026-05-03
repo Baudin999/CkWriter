@@ -1,3 +1,4 @@
+use crate::book::chapter_meta::ChapterMeta;
 use crate::book::entity::Entity;
 use crate::book::paragraphs::Paragraph;
 use crate::book::{Book, Chapter};
@@ -10,6 +11,7 @@ use crate::llm::revision::Revision;
 use crate::settings::Settings;
 use crate::theme;
 use crate::ui;
+use crate::ui::forms::Form;
 use eframe::App;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -44,21 +46,21 @@ mod extract;
 mod pdf;
 mod progression;
 
-/// Editable view of the current chapter's metadata, bound to the right-panel
-/// Chapter tab. Only the writer-editable fields live here; read-only fields
-/// (word_count, voice_score, last_coached_at) are read straight off the
-/// chapter's saved meta on render.
-#[derive(Debug, Clone, Default)]
-pub struct ChapterDraft {
-    /// Stable folder/name pair so we know which chapter the buffer belongs
-    /// to. If the user switches chapters before saving, the dirty draft is
-    /// dropped and re-seeded for the new chapter.
-    pub folder: String,
-    pub name: String,
-    pub summary: String,
-    pub goals: String,
-    pub plot_notes: String,
-    pub dirty: bool,
+/// A user navigation that's been deferred behind the shared "unsaved
+/// changes" prompt. Set by `request_*` helpers when any form is dirty;
+/// resolved by the modal's Discard / Cancel buttons.
+#[derive(Debug, Clone)]
+pub enum PendingNav {
+    /// Open the given chapter, optionally scrolling to a one-based source
+    /// line on arrival. AI-card "jump to source" sets the line; the file
+    /// tree open path leaves it `None`.
+    OpenChapter {
+        path: PathBuf,
+        line: Option<u32>,
+    },
+    SelectEntity(Option<String>),
+    OpenBookPicker,
+    CloseApp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +96,11 @@ pub struct CkWriterApp {
     pub scope_tab: ui::scope_panel::Tab,
     pub char_sub_tab: ui::scope_panel::CharSubTab,
     pub selected_entity: Option<String>,
-    pub entity_dirty: Option<Entity>,
+    /// Forms-framework draft for the entity inspector. `None` when no
+    /// inspector is open; populated lazily on first render against the
+    /// selected entity. Drops to `None` on Save (so the next render re-seeds
+    /// from the freshly-saved entity, picking up id/relation rewrites).
+    pub entity_form: Option<Form<Entity>>,
     /// Search filter shared by Cast / Personae master lists.
     pub character_search: String,
 
@@ -177,10 +183,17 @@ pub struct CkWriterApp {
     pub chapter_op_error: Option<String>,
 
     // === Chapter tab (right panel) ===
-    /// Editable buffer for the current chapter's metadata. `None` when no
-    /// chapter is open. Re-seeded from `Book::chapter.meta` whenever the
-    /// current chapter changes.
-    pub chapter_draft: Option<ChapterDraft>,
+    /// Forms-framework draft for the chapter info form. Holds the full
+    /// `ChapterMeta` so editable fields and read-only stats share one source
+    /// of truth (no drift). `None` when no chapter is open; populated lazily
+    /// on first render of the Chapter tab.
+    pub chapter_form: Option<Form<ChapterMeta>>,
+
+    // === Shared discard prompt ===
+    /// User-initiated navigation deferred behind the discard prompt. Set by
+    /// `request_*` helpers when any form is dirty; cleared by the modal's
+    /// Discard (after applying) or Cancel (without applying).
+    pub pending_nav: Option<PendingNav>,
 
     // === PDF / read mode ===
     pub read_mode: bool,
@@ -241,7 +254,7 @@ impl CkWriterApp {
             scope_tab: ui::scope_panel::Tab::Characters,
             char_sub_tab: ui::scope_panel::CharSubTab::Cast,
             selected_entity: None,
-            entity_dirty: None,
+            entity_form: None,
             character_search: String::new(),
             stream: None,
             stream_pipeline: None,
@@ -279,7 +292,8 @@ impl CkWriterApp {
             new_chapter_dialog: None,
             delete_chapter_confirm: None,
             chapter_op_error: None,
-            chapter_draft: None,
+            chapter_form: None,
+            pending_nav: None,
             read_mode: false,
             pdf_building: false,
             pdf_build_rx: None,
@@ -342,12 +356,126 @@ impl CkWriterApp {
                 self.last_error = Some(format!("save: {e}"));
             }
         }
-        let chapter_dirty = self.chapter_draft.as_ref().is_some_and(|d| d.dirty);
-        if chapter_dirty
-            && ctx
-                .input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::S))
-        {
-            self.save_chapter_draft();
+    }
+
+    /// True if any forms-framework draft has unsaved edits. Drives the
+    /// shared discard prompt.
+    pub fn any_form_dirty(&self) -> bool {
+        self.chapter_form.as_ref().is_some_and(|f| f.dirty())
+            || self.entity_form.as_ref().is_some_and(|f| f.dirty())
+    }
+
+    /// User clicked a chapter in the file tree (or any other path that
+    /// switches the open chapter). If a form is dirty, defer behind the
+    /// discard prompt; otherwise switch immediately.
+    pub fn request_open_chapter(&mut self, path: PathBuf) {
+        self.request_open_chapter_at_line(path, None);
+    }
+
+    /// Variant of `request_open_chapter` that also stages a one-based source
+    /// line to scroll to on arrival. If the user cancels the discard
+    /// prompt, the line is dropped so it doesn't fire against the wrong
+    /// chapter.
+    pub fn request_open_chapter_at_line(&mut self, path: PathBuf, line: impl Into<Option<u32>>) {
+        let line = line.into();
+        let same_chapter = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.file_path == path)
+            .unwrap_or(false);
+        if same_chapter {
+            if let Some(l) = line {
+                self.pending_scroll_line = Some(l.saturating_sub(1) as usize);
+            }
+            return;
+        }
+        if self.any_form_dirty() {
+            self.pending_nav = Some(PendingNav::OpenChapter { path, line });
+        } else {
+            self.open_chapter(&path);
+            if let Some(l) = line {
+                self.pending_scroll_line = Some(l.saturating_sub(1) as usize);
+            }
+        }
+    }
+
+    /// User clicked an entity in the master list. Same gating as
+    /// `request_open_chapter` — defer if the inspector form is dirty.
+    pub fn request_select_entity(&mut self, id: Option<String>) {
+        if self.selected_entity == id {
+            return;
+        }
+        if self.entity_form.as_ref().is_some_and(|f| f.dirty()) {
+            self.pending_nav = Some(PendingNav::SelectEntity(id));
+        } else {
+            self.selected_entity = id;
+            // Drop the prior (clean) form so the inspector re-seeds against
+            // the newly-selected entity on next render.
+            self.entity_form = None;
+        }
+    }
+
+    /// User asked to open the book picker (which closes the current book on
+    /// confirm). Defer if any form is dirty.
+    pub fn request_open_book_picker(&mut self) {
+        if self.any_form_dirty() {
+            self.pending_nav = Some(PendingNav::OpenBookPicker);
+        } else {
+            self.show_book_picker = true;
+        }
+    }
+
+    /// Resolve a discard-then-do navigation: drop all form drafts and apply
+    /// the staged action.
+    fn discard_drafts_and_apply_pending(&mut self, ctx: &egui::Context) {
+        let nav = self.pending_nav.take();
+        self.chapter_form = None;
+        self.entity_form = None;
+        match nav {
+            Some(PendingNav::OpenChapter { path, line }) => {
+                self.open_chapter(&path);
+                if let Some(l) = line {
+                    self.pending_scroll_line = Some(l.saturating_sub(1) as usize);
+                }
+            }
+            Some(PendingNav::SelectEntity(id)) => self.selected_entity = id,
+            Some(PendingNav::OpenBookPicker) => self.show_book_picker = true,
+            Some(PendingNav::CloseApp) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            None => {}
+        }
+    }
+
+    /// Shared "You have unsaved changes. Discard?" modal. Renders only when
+    /// `pending_nav` is staged. Discard applies the navigation; Cancel drops
+    /// it without touching the drafts.
+    fn discard_modal(&mut self, ctx: &egui::Context) {
+        if self.pending_nav.is_none() {
+            return;
+        }
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("You have unsaved changes. Discard?");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Discard").clicked() {
+                        discard = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if discard {
+            self.discard_drafts_and_apply_pending(ctx);
+        } else if cancel {
+            self.pending_nav = None;
         }
     }
 
@@ -506,6 +634,13 @@ impl CkWriterApp {
 
 impl App for CkWriterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Intercept window close: if any form is dirty, cancel the close and
+        // stage a `CloseApp` pending nav so the shared discard modal handles
+        // the choice. Discard then re-issues the close command.
+        if ctx.input(|i| i.viewport().close_requested()) && self.any_form_dirty() {
+            self.pending_nav = Some(PendingNav::CloseApp);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         self.check_ollama(ctx);
         self.handle_shortcuts(ctx);
         self.poll_stream();
@@ -611,6 +746,7 @@ impl App for CkWriterApp {
         self.book_picker(ctx);
         self.new_chapter_dialog(ctx);
         self.delete_chapter_confirm(ctx);
+        self.discard_modal(ctx);
         ui::settings_dialog::show(self, ctx);
 
         if !self.show_book_picker && self.book.is_none() {

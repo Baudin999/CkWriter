@@ -400,7 +400,7 @@ fn apply_pending(app: &mut CkWriterApp, pending: PendingActions) {
         app.delete_chapter_confirm = Some(pair);
     }
     if let Some(p) = pending.open {
-        app.open_chapter(&p);
+        app.request_open_chapter(p);
     }
     let _ = manuscript::MANAGED_FOLDERS; // keep the import live in release builds
 }

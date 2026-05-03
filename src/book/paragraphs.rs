@@ -123,7 +123,7 @@ pub fn parse_and_match_meta(text: &str, prior: &[ParagraphMeta]) -> Vec<Paragrap
 }
 
 /// True if the persisted index for the chapter would change vs `prior`.
-/// Drives the "should we save?" check in `seed_chapter_draft`.
+/// Drives the "should we save?" check in `refresh_chapter_paragraph_index`.
 pub fn differs(new: &[Paragraph], prior: &[ParagraphMeta]) -> bool {
     if new.len() != prior.len() {
         return true;

@@ -2,6 +2,7 @@ use crate::app::CkWriterApp;
 use crate::book::entity::{Entity, EntityKind, ProgressionEntry, Relation};
 use crate::icons;
 use crate::theme;
+use crate::ui::forms::{self, Form, FormAction};
 use egui::RichText;
 
 /// Bottom-of-rail entry point used when no inline detail is active. Reads the
@@ -35,97 +36,97 @@ pub fn render_detail(app: &mut CkWriterApp, ui: &mut egui::Ui, existing: &Entity
             .insert(egui::TextStyle::Button, egui::FontId::proportional(15.0));
 
         let id = existing.id.clone();
-        ui.heading(&existing.name);
-        ui.separator();
 
-        // The form is two-way bound to `app.entity_dirty`. Each frame we lift
-        // the working copy into a local, let the widgets mutate it directly,
-        // and unconditionally write it back. The previous `if changed` gate
-        // dropped keystrokes whenever a sub-widget didn't propagate `.changed()`.
-        let mut e = match app.entity_dirty.as_ref() {
-            Some(d) if d.id == existing.id => d.clone(),
-            _ => existing.clone(),
+        // Detach the form from app so the body closure has free access to
+        // the rest of `app` (categories, relation kinds, target list). Drop
+        // any form that belongs to a different entity — the discard prompt
+        // has already gated the dirty case.
+        let mut form = match app.entity_form.take() {
+            Some(f) if f.original().id == existing.id => f,
+            _ => Form::new(existing),
         };
+        form.rebase_if_clean(existing);
 
-        egui::Grid::new(format!("inspector-grid-{id}"))
-            .num_columns(2)
-            .spacing([8.0, 6.0])
-            .show(ui, |ui| {
-                field(ui, "name", &mut e.name);
-                field(ui, "role", &mut e.role);
-                field(ui, "age", &mut e.age);
-                field(ui, "tone", &mut e.tone);
-                category_row(ui, app, &mut e.category);
-            });
+        let action = forms::render(&mut form, &existing.name, ui, |ui, e| {
+            ui.separator();
+            egui::Grid::new(format!("inspector-grid-{id}"))
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    field(ui, "name", &mut e.name);
+                    field(ui, "role", &mut e.role);
+                    field(ui, "age", &mut e.age);
+                    field(ui, "tone", &mut e.tone);
+                    category_row(ui, app, &mut e.category);
+                });
 
-        ui.label(
-            RichText::new("voice notes")
-                .small()
-                .color(theme::TEXT_MUTED),
-        );
-        ui.add(
-            egui::TextEdit::multiline(&mut e.voice_notes)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
+            ui.label(
+                RichText::new("voice notes")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            ui.add(
+                egui::TextEdit::multiline(&mut e.voice_notes)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
 
-        ui.label(
-            RichText::new("aliases (comma-separated)")
-                .small()
-                .color(theme::TEXT_MUTED),
-        );
-        let mut aliases_str = e.aliases.join(", ");
-        if ui
-            .add(egui::TextEdit::singleline(&mut aliases_str).desired_width(f32::INFINITY))
-            .changed()
-        {
-            e.aliases = aliases_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
+            ui.label(
+                RichText::new("aliases (comma-separated)")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let mut aliases_str = e.aliases.join(", ");
+            if ui
+                .add(egui::TextEdit::singleline(&mut aliases_str).desired_width(f32::INFINITY))
+                .changed()
+            {
+                e.aliases = aliases_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
 
-        ui.label(
-            RichText::new("free text / lore")
-                .small()
-                .color(theme::TEXT_MUTED),
-        );
-        ui.add(
-            egui::TextEdit::multiline(&mut e.free_text)
-                .desired_rows(6)
-                .desired_width(f32::INFINITY),
-        );
+            ui.label(
+                RichText::new("free text / lore")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            ui.add(
+                egui::TextEdit::multiline(&mut e.free_text)
+                    .desired_rows(6)
+                    .desired_width(f32::INFINITY),
+            );
 
-        ui.add_space(6.0);
-        relations_section(ui, app, &existing.id, &mut e.relations);
+            ui.add_space(6.0);
+            relations_section(ui, app, &existing.id, &mut e.relations);
+        });
 
-        // Always store the working copy back. `can_save` is derived from the
-        // diff against the saved entity, so a no-op write here doesn't trip
-        // the Save/Revert buttons.
-        let dirty = e != *existing;
-        app.entity_dirty = Some(e);
+        app.entity_form = Some(form);
 
-        ui.add_space(6.0);
-        let can_save = dirty;
+        // Close button sits next to the framework's Save/Revert. It belongs
+        // here (not in the framework) because it's specific to the inspector
+        // selection model.
+        let mut close_clicked = false;
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_save, egui::Button::new("Save"))
-                .clicked()
-            {
-                app.commit_entity_edit();
-            }
-            if ui
-                .add_enabled(can_save, egui::Button::new("Revert"))
-                .clicked()
-            {
-                app.entity_dirty = None;
-            }
             if ui.button("Close").clicked() {
-                app.selected_entity = None;
-                app.entity_dirty = None;
+                close_clicked = true;
             }
         });
+
+        match action {
+            FormAction::Save => app.commit_entity_edit(),
+            FormAction::Revert => {
+                if let Some(f) = app.entity_form.as_mut() {
+                    f.revert();
+                }
+            }
+            FormAction::None => {}
+        }
+        if close_clicked {
+            app.request_select_entity(None);
+        }
 
         if existing.kind == EntityKind::Character {
             progression_section(app, ui, &existing.id, &existing.progression);

@@ -20,13 +20,21 @@ impl super::CkWriterApp {
         self.matcher = Some(EntityMatcher::build(&book.entities));
         self.refresh_entity_hits();
         self.rebuild_char_index();
-        self.selected_entity = Some(id);
+        // Route through the request helper so a dirty inspector form for
+        // the previous selection isn't silently dropped — the new entity
+        // is already on disk regardless of the user's discard choice.
+        self.request_select_entity(Some(id));
     }
 
     pub fn commit_entity_edit(&mut self) {
-        let Some(mut e) = self.entity_dirty.take() else {
+        // Pull the working copy out of the form (drop the form entirely so
+        // the inspector re-seeds against the freshly-saved entity on next
+        // render — this is what picks up the slugified id and the dropped
+        // dangling relations).
+        let Some(form) = self.entity_form.take() else {
             return;
         };
+        let mut e = form.draft().clone();
         let Some(book) = &mut self.book else { return };
         // Re-slug if name changed and old id no longer matches.
         let original_id = e.id.clone();

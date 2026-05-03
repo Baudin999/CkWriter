@@ -25,15 +25,14 @@ impl super::CkWriterApp {
             return;
         }
 
-        // entity_dirty is always populated while the inspector is open; only
-        // auto-commit when the working copy actually differs from disk.
-        let needs_commit = match (self.entity_dirty.as_ref(), self.book.as_ref()) {
-            (Some(d), Some(book)) if d.id == entity_id => book
-                .entity(entity_id)
-                .map(|saved| saved != d)
-                .unwrap_or(true),
-            _ => false,
-        };
+        // The inspector's form is populated whenever the inspector is open;
+        // auto-commit if the user has unsaved edits for THIS character so
+        // the AI append doesn't clobber a stale form save later.
+        let needs_commit = self
+            .entity_form
+            .as_ref()
+            .map(|f| f.draft().id == entity_id && f.dirty())
+            .unwrap_or(false);
         if needs_commit {
             self.commit_entity_edit();
         }

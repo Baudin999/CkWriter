@@ -37,7 +37,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 .on_hover_text("Open book")
                 .clicked()
             {
-                app.show_book_picker = true;
+                app.request_open_book_picker();
             }
             ui.separator();
             let (mode_icon, mode_text) = if app.read_mode {
