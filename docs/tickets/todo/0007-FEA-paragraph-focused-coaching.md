@@ -59,3 +59,6 @@ Build in two phases. Phase 1 is the contract (testable without UI); phase 2 wire
 - `coach::tests::focus_run_keeps_on_target_flag`
 - `coach::tests::focus_voice_run_does_not_update_score`
 - `coach::tests::focus_run_refuses_locked_paragraph`
+
+## Status notes (parked 2026-05-03)
+Implementation plan above is complete and unblocked. Parked because the writer's actual blocker is the LaTeX editing surface, not coach noise — recent ticket sequence (#0004 cache, #0025 history, #0027 notes, #0005 locks) all addresses coach noise without addressing the surface friction that is keeping the writer from putting words on the page. Resume after #0015 (LaTeX highlighting), #0028 (Super+I emph wrap), and #0029 (Super+L diff balloon) ship and we re-evaluate whether per-pipeline focus is still wanted. Nothing in the codebase has been changed for #0007 yet — no rollback needed.
