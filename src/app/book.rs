@@ -33,9 +33,7 @@ impl super::CkWriterApp {
         self.dirty = false;
         self.selected_entity = None;
         self.entity_dirty = None;
-        self.notes_text.clear();
-        self.notes_dirty = false;
-        self.notes_path = None;
+        self.chapter_draft = None;
         self.char_stream = None;
         self.last_char_buffer = None;
         self.char_proposals.clear();
@@ -112,6 +110,7 @@ impl super::CkWriterApp {
                             file_path: path.to_path_buf(),
                             display_title: stem.to_string(),
                             in_manuscript: false,
+                            meta: crate::book::chapter_meta::ChapterMeta::default(),
                         })
                     });
                 }
@@ -125,7 +124,7 @@ impl super::CkWriterApp {
                 self.diff_scroll_y = 0.0;
                 self.settings.last_chapter = Some(path.to_path_buf());
                 let _ = self.settings.save();
-                self.load_notes();
+                self.seed_chapter_draft();
             }
             Err(e) => {
                 self.last_error = Some(format!("open failed: {e}"));
@@ -139,10 +138,52 @@ impl super::CkWriterApp {
         };
         std::fs::write(&ch.file_path, &self.editor_text)?;
         self.dirty = false;
+        // Recompute and persist word_count from the just-saved prose. Cheap
+        // (regex pass + whitespace split) and keeps the Chapter tab honest
+        // without a separate "stats" job.
+        let folder = ch.folder.clone();
+        let name = ch.name.clone();
+        if !folder.is_empty() && !name.is_empty() {
+            let prose = crate::book::latex::to_prose(&self.editor_text);
+            let wc = crate::book::chapter_meta::word_count_from_prose(&prose);
+            self.update_chapter_meta(&folder, &name, |m| m.word_count = wc);
+        }
         // Cross-chapter index reads from disk; refresh it so the just-saved
         // chapter's edits are reflected in the inspector's "Appears in" list.
         self.rebuild_char_index();
         Ok(())
+    }
+
+    /// Apply `mutate` to the chapter's metadata, persist it to disk, and
+    /// mirror the change onto `current_chapter.meta` so the UI reads the
+    /// fresh value without a reload.
+    pub(crate) fn update_chapter_meta<F: FnOnce(&mut crate::book::chapter_meta::ChapterMeta)>(
+        &mut self,
+        folder: &str,
+        name: &str,
+        mutate: F,
+    ) {
+        let Some(book) = self.book.as_mut() else {
+            return;
+        };
+        let Some(idx) = book
+            .chapters
+            .iter()
+            .position(|c| c.folder == folder && c.name == name)
+        else {
+            return;
+        };
+        mutate(&mut book.chapters[idx].meta);
+        let meta = book.chapters[idx].meta.clone();
+        let root = book.root.clone();
+        if let Err(e) = crate::book::chapter_meta::save(&root, folder, name, &meta) {
+            log::warn!("chapter meta save {folder}/{name} failed: {e}");
+        }
+        if let Some(cur) = self.current_chapter.as_mut() {
+            if cur.folder == folder && cur.name == name {
+                cur.meta = meta;
+            }
+        }
     }
 
     /// Add a new chapter under `folder` with `title`. Saves any pending
@@ -333,25 +374,48 @@ impl super::CkWriterApp {
         }
     }
 
-    fn load_notes(&mut self) {
+    /// Initialise (or replace) the chapter-tab draft from the current
+    /// chapter's saved metadata. Called whenever the active chapter changes
+    /// — any unsaved edits in the previous draft are discarded, mirroring how
+    /// the legacy `.notes.md` scratchpad worked.
+    pub fn seed_chapter_draft(&mut self) {
         let Some(ch) = &self.current_chapter else {
+            self.chapter_draft = None;
             return;
         };
-        let p = ch.file_path.with_extension("notes.md");
-        self.notes_text = std::fs::read_to_string(&p).unwrap_or_default();
-        self.notes_dirty = false;
-        self.notes_path = Some(p);
+        self.chapter_draft = Some(crate::app::ChapterDraft {
+            folder: ch.folder.clone(),
+            name: ch.name.clone(),
+            summary: ch.meta.summary.clone(),
+            goals: ch.meta.goals.clone(),
+            plot_notes: ch.meta.plot_notes.clone(),
+            dirty: false,
+        });
     }
 
-    pub fn save_notes(&mut self) {
-        let Some(p) = self.notes_path.clone() else {
+    /// Persist the chapter-tab draft into the chapter's metadata file. No-op
+    /// if there is no draft, no current chapter, or the draft belongs to a
+    /// different chapter than the one currently open (defensive — happens if
+    /// chapter switching races with a save shortcut).
+    pub fn save_chapter_draft(&mut self) {
+        let Some(draft) = self.chapter_draft.clone() else {
             return;
         };
-        if let Err(e) = std::fs::write(&p, &self.notes_text) {
-            self.last_error = Some(format!("notes save: {e}"));
+        let cur_matches = self
+            .current_chapter
+            .as_ref()
+            .is_some_and(|c| c.folder == draft.folder && c.name == draft.name);
+        if !cur_matches {
             return;
         }
-        self.notes_dirty = false;
+        self.update_chapter_meta(&draft.folder, &draft.name, |m| {
+            m.summary = draft.summary.clone();
+            m.goals = draft.goals.clone();
+            m.plot_notes = draft.plot_notes.clone();
+        });
+        if let Some(d) = self.chapter_draft.as_mut() {
+            d.dirty = false;
+        }
     }
 
     /// Scroll the editor so the byte at `byte_start` is in view, and place

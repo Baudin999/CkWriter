@@ -11,7 +11,7 @@ pub enum Tab {
     Locations,
     AI,
     Chat,
-    Notes,
+    Chapter,
 }
 
 /// Sub-tabs inside the Characters tab. Each is its own scrollable view so
@@ -31,7 +31,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             (Tab::Locations, "Locations"),
             (Tab::AI, "AI"),
             (Tab::Chat, "Chat"),
-            (Tab::Notes, "Notes"),
+            (Tab::Chapter, "Chapter"),
         ] {
             let selected = app.scope_tab == tab;
             if ui.selectable_label(selected, label).clicked() {
@@ -46,7 +46,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         Tab::Locations => show_locations(app, ui),
         Tab::AI => show_ai(app, ui),
         Tab::Chat => show_chat(app, ui),
-        Tab::Notes => show_notes(app, ui),
+        Tab::Chapter => show_chapter(app, ui),
     }
 }
 
@@ -1173,32 +1173,164 @@ fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
     ui.add_space(4.0);
 }
 
-fn show_notes(app: &mut CkWriterApp, ui: &mut egui::Ui) {
-    ui.label(
-        RichText::new("Per-chapter notes")
-            .small()
-            .color(theme::TEXT_MUTED),
-    );
+fn show_chapter(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     if app.current_chapter.is_none() {
         ui.label(RichText::new("Open a chapter first.").color(theme::TEXT_MUTED));
         return;
     }
-    let mut changed = false;
-    let resp = ui.add_sized(
-        ui.available_size(),
-        egui::TextEdit::multiline(&mut app.notes_text)
-            .desired_rows(20)
-            .hint_text("scratchpad — saved next to the chapter as .notes.md"),
-    );
-    if resp.changed() {
-        changed = true;
+    if app.chapter_draft.is_none() {
+        // Defensive: open_chapter should always have seeded a draft, but if
+        // we reach the panel without one (e.g. after a future code path
+        // forgets to call seed_chapter_draft), do it lazily here so the
+        // writer doesn't see a blank tab.
+        app.seed_chapter_draft();
     }
-    if changed {
-        app.notes_dirty = true;
-    }
-    if ui.button("Save notes").clicked() {
-        app.save_notes();
-    }
+    let read_only_meta = app
+        .current_chapter
+        .as_ref()
+        .map(|c| c.meta.clone())
+        .unwrap_or_default();
+
+    egui::ScrollArea::vertical()
+        .id_salt("chapter-tab-scroll")
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            let Some(draft) = app.chapter_draft.as_mut() else {
+                return;
+            };
+            let mut changed = false;
+
+            ui.label(
+                RichText::new("summary")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut draft.summary)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("one or two sentences — what happens in this chapter"),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            ui.add_space(6.0);
+
+            ui.label(RichText::new("goals").small().color(theme::TEXT_MUTED));
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut draft.goals)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("what this chapter needs to accomplish"),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            ui.add_space(6.0);
+
+            ui.label(
+                RichText::new("plot notes / scratchpad")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            if ui
+                .add(
+                    egui::TextEdit::multiline(&mut draft.plot_notes)
+                        .desired_rows(10)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("free-form notes — discovery writing, beats, reminders"),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            if changed {
+                draft.dirty = true;
+            }
+
+            ui.add_space(8.0);
+            let dirty = draft.dirty;
+            if ui
+                .add_enabled(dirty, egui::Button::new("Save chapter info"))
+                .clicked()
+            {
+                app.save_chapter_draft();
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            chapter_readonly_stats(ui, &read_only_meta);
+        });
+}
+
+fn chapter_readonly_stats(ui: &mut egui::Ui, meta: &crate::book::chapter_meta::ChapterMeta) {
+    ui.label(RichText::new("stats").small().color(theme::TEXT_MUTED));
+    egui::Grid::new("chapter-tab-stats")
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("word count").small().color(theme::TEXT_MUTED));
+            ui.label(RichText::new(meta.word_count.to_string()));
+            ui.end_row();
+
+            ui.label(
+                RichText::new("voice score")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let voice = meta
+                .voice_score
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "—".to_string());
+            ui.label(RichText::new(voice));
+            ui.end_row();
+
+            ui.label(
+                RichText::new("last coached")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            ui.label(RichText::new(format_unix_seconds(meta.last_coached_at)));
+            ui.end_row();
+        });
+}
+
+fn format_unix_seconds(ts: Option<i64>) -> String {
+    let Some(t) = ts else {
+        return "—".to_string();
+    };
+    // Avoid pulling in chrono just for one timestamp. ISO-ish UTC is plenty
+    // here — the writer only needs to know whether the score is fresh or
+    // stale, not the exact minute.
+    let days = t / 86_400;
+    // 1970-01-01 was a Thursday; that's not what we render, just the date.
+    // Use a simple proleptic Gregorian calc.
+    let (y, m, d) = days_to_ymd(days);
+    let secs_of_day = t.rem_euclid(86_400);
+    let h = secs_of_day / 3600;
+    let mi = (secs_of_day % 3600) / 60;
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02} UTC")
+}
+
+/// Convert a count of days since 1970-01-01 to a (year, month, day) tuple in
+/// the proleptic Gregorian calendar. Lifted from Howard Hinnant's date
+/// algorithm; kept here so the Chapter tab doesn't depend on chrono.
+fn days_to_ymd(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = y + if m <= 2 { 1 } else { 0 };
+    (y as i32, m as u32, d as u32)
 }
 
 // ─────────────────────────── shared helpers ────────────────────────

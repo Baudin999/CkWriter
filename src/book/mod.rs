@@ -1,3 +1,4 @@
+pub mod chapter_meta;
 pub mod chapters;
 pub mod data;
 pub mod dismissals;
@@ -7,6 +8,7 @@ pub mod manuscript;
 pub mod tree;
 
 use anyhow::{anyhow, Result};
+use chapter_meta::ChapterMeta;
 use data::BookData;
 use dismissals::Dismissals;
 use entity::{Entities, Entity, EntityKind};
@@ -28,6 +30,10 @@ pub struct Chapter {
     pub file_path: PathBuf,
     pub display_title: String,
     pub in_manuscript: bool,
+    /// Per-chapter metadata — summary, goals, word count, last voice score.
+    /// Loaded from `Info/chapters/<folder>/<name>.json` in `build_chapters`;
+    /// the on-disk file is the source of truth, this is the cached copy.
+    pub meta: ChapterMeta,
 }
 
 pub struct Book {
@@ -228,6 +234,7 @@ fn build_chapters(root: &Path, manuscript: &Manuscript) -> Vec<Chapter> {
             // something readable, even before the writer adds \chapter{...}.
             manuscript::humanize(&c.name)
         });
+        let meta = load_or_seed_meta(root, &c.folder, &c.name, &file_path);
         out.push(Chapter {
             folder: c.folder.clone(),
             name: c.name.clone(),
@@ -235,6 +242,7 @@ fn build_chapters(root: &Path, manuscript: &Manuscript) -> Vec<Chapter> {
             file_path,
             display_title,
             in_manuscript: true,
+            meta,
         });
         *pos += 1;
     }
@@ -246,6 +254,7 @@ fn build_chapters(root: &Path, manuscript: &Manuscript) -> Vec<Chapter> {
         for orphan in &listings[folder].orphans {
             let display_title = read_chapter_title(&orphan.file_path)
                 .unwrap_or_else(|| manuscript::humanize(&orphan.name));
+            let meta = load_or_seed_meta(root, folder, &orphan.name, &orphan.file_path);
             out.push(Chapter {
                 folder: folder.clone(),
                 name: orphan.name.clone(),
@@ -253,8 +262,125 @@ fn build_chapters(root: &Path, manuscript: &Manuscript) -> Vec<Chapter> {
                 file_path: orphan.file_path.clone(),
                 display_title,
                 in_manuscript: false,
+                meta,
             });
         }
     }
     out
+}
+
+/// Load a chapter's sidecar metadata from disk, or — on first open — seed it
+/// from the chapter's prose (for `word_count`) and the legacy `.notes.md`
+/// scratchpad (for `plot_notes`). The seeded file is written back so future
+/// opens are pure reads.
+fn load_or_seed_meta(root: &Path, folder: &str, name: &str, tex_path: &Path) -> ChapterMeta {
+    let meta_path = chapter_meta::file_path(root, folder, name);
+    if meta_path.exists() {
+        return chapter_meta::load(root, folder, name);
+    }
+    let mut meta = ChapterMeta::default();
+    if let Ok(tex) = std::fs::read_to_string(tex_path) {
+        let prose = latex::to_prose(&tex);
+        meta.word_count = chapter_meta::word_count_from_prose(&prose);
+    }
+    if let Some(notes) = read_legacy_notes(tex_path) {
+        meta.plot_notes = notes;
+    }
+    if let Err(e) = chapter_meta::save(root, folder, name, &meta) {
+        log::warn!("seed chapter meta {folder}/{name} failed: {e}");
+    }
+    meta
+}
+
+/// Read the legacy `<chapter>.notes.md` scratchpad that lived next to the
+/// `.tex` before the metadata sidecar existed. Returns `None` if the file is
+/// missing or empty. The legacy file is left in place — the user keeps a copy
+/// in git history; new edits flow through `chapter.json`.
+fn read_legacy_notes(tex_path: &Path) -> Option<String> {
+    let mut notes_path = tex_path.to_path_buf();
+    let stem = tex_path.file_stem()?.to_string_lossy().into_owned();
+    notes_path.set_file_name(format!("{stem}.notes.md"));
+    let s = std::fs::read_to_string(&notes_path).ok()?;
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tempdir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!("ckwriter-book-mod-{nanos}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn seed_meta_computes_word_count_from_prose() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("Modern")).unwrap();
+        let tex_path = root.join("Modern/010_Awakening.tex");
+        // 6 prose words once `\chapter{...}` is unwrapped to its title text.
+        std::fs::write(&tex_path, "\\chapter{Awakening}\n\nHe ran into the dim hall.\n").unwrap();
+        let meta = load_or_seed_meta(&root, "Modern", "Awakening", &tex_path);
+        // "Awakening" + "He ran into the dim hall." = 7 words.
+        assert_eq!(meta.word_count, 7);
+        assert!(meta.plot_notes.is_empty());
+        // The seeded file is now on disk for next time.
+        assert!(chapter_meta::file_path(&root, "Modern", "Awakening").exists());
+    }
+
+    #[test]
+    fn seed_meta_migrates_legacy_notes_md() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("Modern")).unwrap();
+        let tex_path = root.join("Modern/010_Awakening.tex");
+        std::fs::write(&tex_path, "\\chapter{Awakening}\nbody\n").unwrap();
+        std::fs::write(
+            root.join("Modern/010_Awakening.notes.md"),
+            "old scratchpad content",
+        )
+        .unwrap();
+        let meta = load_or_seed_meta(&root, "Modern", "Awakening", &tex_path);
+        assert_eq!(meta.plot_notes, "old scratchpad content");
+        // Legacy file is intentionally left in place — user keeps a copy in
+        // git history. We don't clean it up.
+        assert!(root.join("Modern/010_Awakening.notes.md").exists());
+    }
+
+    #[test]
+    fn seed_meta_skips_empty_notes_md() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("Modern")).unwrap();
+        let tex_path = root.join("Modern/010_Awakening.tex");
+        std::fs::write(&tex_path, "body").unwrap();
+        std::fs::write(root.join("Modern/010_Awakening.notes.md"), "   \n\t\n").unwrap();
+        let meta = load_or_seed_meta(&root, "Modern", "Awakening", &tex_path);
+        assert!(meta.plot_notes.is_empty());
+    }
+
+    #[test]
+    fn existing_meta_takes_precedence_over_seed() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("Modern")).unwrap();
+        let tex_path = root.join("Modern/010_Awakening.tex");
+        std::fs::write(&tex_path, "fresh body").unwrap();
+        // Pre-existing meta with a hand-written summary; seed should not stomp it.
+        let prior = chapter_meta::ChapterMeta {
+            summary: "kept".into(),
+            word_count: 9999,
+            ..Default::default()
+        };
+        chapter_meta::save(&root, "Modern", "Awakening", &prior).unwrap();
+        let meta = load_or_seed_meta(&root, "Modern", "Awakening", &tex_path);
+        assert_eq!(meta.summary, "kept");
+        assert_eq!(meta.word_count, 9999);
+    }
 }

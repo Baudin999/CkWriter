@@ -46,7 +46,6 @@ impl FlagKind {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawVoice {
-    #[allow(dead_code)]
     #[serde(default)]
     pub score: Option<i32>,
     #[serde(default)]

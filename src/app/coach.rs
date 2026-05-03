@@ -141,10 +141,12 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
         use crate::llm::revision::{anchor, parse_flags_only, parse_voice, FlagKind};
         let prose = latex::to_prose(&self.editor_text);
         let parsed_ok;
+        let mut voice_score: Option<i32> = None;
         let flags = match pipeline {
             Pipeline::Voice => match parse_voice(buffer) {
                 Some(v) => {
                     parsed_ok = true;
+                    voice_score = v.score;
                     v.flags
                 }
                 None => {
@@ -165,6 +167,28 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
                 }
             }
         };
+        // Persist the voice score onto the chapter's metadata before we move
+        // on to flag handling. A successful parse with no score (older prompt
+        // outputs) still updates last_coached_at so the writer can see the
+        // pipeline ran.
+        if pipeline == Pipeline::Voice && parsed_ok {
+            if let Some(ch) = self.current_chapter.as_ref() {
+                let folder = ch.folder.clone();
+                let name = ch.name.clone();
+                if !folder.is_empty() && !name.is_empty() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    self.update_chapter_meta(&folder, &name, |m| {
+                        if voice_score.is_some() {
+                            m.voice_score = voice_score;
+                        }
+                        m.last_coached_at = Some(now);
+                    });
+                }
+            }
+        }
         if !parsed_ok {
             log::warn!(
                 "pipeline={} parse failed: response_bytes={} preview={:?}",

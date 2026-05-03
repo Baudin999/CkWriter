@@ -43,6 +43,23 @@ mod extract;
 mod pdf;
 mod progression;
 
+/// Editable view of the current chapter's metadata, bound to the right-panel
+/// Chapter tab. Only the writer-editable fields live here; read-only fields
+/// (word_count, voice_score, last_coached_at) are read straight off the
+/// chapter's saved meta on render.
+#[derive(Debug, Clone, Default)]
+pub struct ChapterDraft {
+    /// Stable folder/name pair so we know which chapter the buffer belongs
+    /// to. If the user switches chapters before saving, the dirty draft is
+    /// dropped and re-seeded for the new chapter.
+    pub folder: String,
+    pub name: String,
+    pub summary: String,
+    pub goals: String,
+    pub plot_notes: String,
+    pub dirty: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestOutcome {
     /// Parsed cleanly (strict or salvage); revisions populated, possibly empty.
@@ -149,10 +166,11 @@ pub struct CkWriterApp {
     /// failures don't get lost in the log.
     pub chapter_op_error: Option<String>,
 
-    // === Notes ===
-    pub notes_text: String,
-    pub notes_dirty: bool,
-    pub notes_path: Option<PathBuf>,
+    // === Chapter tab (right panel) ===
+    /// Editable buffer for the current chapter's metadata. `None` when no
+    /// chapter is open. Re-seeded from `Book::chapter.meta` whenever the
+    /// current chapter changes.
+    pub chapter_draft: Option<ChapterDraft>,
 
     // === PDF / read mode ===
     pub read_mode: bool,
@@ -249,9 +267,7 @@ impl CkWriterApp {
             new_chapter_dialog: None,
             delete_chapter_confirm: None,
             chapter_op_error: None,
-            notes_text: String::new(),
-            notes_dirty: false,
-            notes_path: None,
+            chapter_draft: None,
             read_mode: false,
             pdf_building: false,
             pdf_build_rx: None,
@@ -314,11 +330,12 @@ impl CkWriterApp {
                 self.last_error = Some(format!("save: {e}"));
             }
         }
-        if self.notes_dirty
+        let chapter_dirty = self.chapter_draft.as_ref().is_some_and(|d| d.dirty);
+        if chapter_dirty
             && ctx
                 .input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::S))
         {
-            self.save_notes();
+            self.save_chapter_draft();
         }
     }
 
@@ -530,8 +547,8 @@ impl App for CkWriterApp {
                 ui::scope_panel::CharSubTab::Cast | ui::scope_panel::CharSubTab::Personae
             );
         // Entity details only belong on tabs that are about entities — keeping
-        // them visible on AI / Chat / Notes leaks an unrelated character form
-        // under the panel.
+        // them visible on AI / Chat / Chapter leaks an unrelated character
+        // form under the panel.
         let inspector_relevant = matches!(
             self.scope_tab,
             ui::scope_panel::Tab::Characters | ui::scope_panel::Tab::Locations
