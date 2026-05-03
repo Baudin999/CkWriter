@@ -250,20 +250,24 @@ fn draw_chapter_row(
         text = text.color(Color32::WHITE).strong();
     }
 
-    // Justified layout so the selectable_label expands to the full width of
-    // the sidebar — turning each row into a full-width "card" rather than a
-    // text-tight pill.
-    let response = ui
-        .with_layout(
-            egui::Layout::top_down_justified(egui::Align::LEFT),
-            |ui| ui.selectable_label(is_current, text),
-        )
-        .inner;
-    if response.clicked() {
-        pending.open = Some(chapter.file_path.clone());
-    }
+    // The selectable_label shows the row's selected state but won't receive
+    // clicks: in manuscript rows the dnd_drag_source wrapper above us covers
+    // it and egui's hit-test suppresses click-only widgets sitting under a
+    // drag-only widget. Opening the chapter goes through the explicit "open"
+    // button on the right instead, which sits on top of the drag layer.
+    let row_response = ui.horizontal(|ui| {
+        // Selectable_label is purely visual here — clicks are intercepted by
+        // the dnd_drag_source wrapper above. We keep it for the selected-row
+        // background highlight; the open button below is what actually opens.
+        let _ = ui.selectable_label(is_current, text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("open").clicked() {
+                pending.open = Some(chapter.file_path.clone());
+            }
+        });
+    });
 
-    response.context_menu(|ui| {
+    row_response.response.context_menu(|ui| {
         if ui.button("Open").clicked() {
             pending.open = Some(chapter.file_path.clone());
             ui.close_menu();
