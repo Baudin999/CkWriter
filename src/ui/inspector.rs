@@ -1,5 +1,6 @@
 use crate::app::CkWriterApp;
 use crate::book::entity::{Entity, EntityKind, ProgressionEntry, Relation};
+use crate::icons;
 use crate::theme;
 use egui::RichText;
 
@@ -296,7 +297,7 @@ fn relations_section(
             relation_kind_combo(ui, idx, &kinds, &mut rel.kind);
             relation_target_combo(ui, idx, &targets, &mut rel.id);
             if ui
-                .small_button("\u{2715}")
+                .small_button(icons::TIMES)
                 .on_hover_text("remove")
                 .clicked()
             {

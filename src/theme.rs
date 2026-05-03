@@ -69,6 +69,24 @@ fn install_fonts(ctx: &egui::Context) {
     // resolves even if iA Writer isn't installed on this machine.
     writer_chain.push("Ubuntu-Light".to_owned());
 
+    // Bundle Font Awesome 4 so icon glyphs (PUA, U+F000–U+F2FF) render
+    // anywhere we drop them into a string. Loaded as a fallback on every
+    // family rather than a separate FontFamily so callers don't need to
+    // switch fonts mid-layout.
+    let fa_bytes = include_bytes!("../assets/fonts/fontawesome-webfont.ttf");
+    fonts.font_data.insert(
+        "fontawesome".to_owned(),
+        Arc::new(FontData::from_static(fa_bytes)),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("fontawesome".to_owned());
+    }
+    writer_chain.push("fontawesome".to_owned());
+
     fonts
         .families
         .insert(FontFamily::Name(WRITER_FAMILY.into()), writer_chain);

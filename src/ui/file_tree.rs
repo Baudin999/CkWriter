@@ -2,6 +2,7 @@ use crate::app::CkWriterApp;
 use crate::book::manuscript::{self, ChapterRef};
 use crate::book::tree::FileNode;
 use crate::book::Chapter;
+use crate::icons;
 use crate::theme;
 use egui::{Color32, Frame, Margin, RichText};
 use std::collections::HashSet;
@@ -72,7 +73,11 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                             .color(theme::ACCENT),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("+ New").clicked() {
+                        if ui
+                            .small_button(format!("{}  New", icons::PLUS))
+                            .on_hover_text("New chapter")
+                            .clicked()
+                        {
                             pending.open_new_chapter = true;
                         }
                     });
@@ -80,7 +85,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
 
                 if manuscript_chapters.is_empty() {
                     ui.label(
-                        RichText::new("No chapters yet — click \"+ New\".")
+                        RichText::new(format!("No chapters yet — click \"{}  New\".", icons::PLUS))
                             .small()
                             .color(theme::TEXT_MUTED),
                     );
@@ -231,17 +236,12 @@ fn draw_chapter_row(
     pending: &mut PendingActions,
 ) {
     let is_current = current_path.as_ref() == Some(&chapter.file_path);
-    let badge = if in_manuscript {
-        chapter
-            .folder
-            .chars()
-            .next()
-            .unwrap_or(' ')
-            .to_ascii_uppercase()
+    let icon = if in_manuscript {
+        icons::FILE_TEXT
     } else {
-        '·'
+        icons::CIRCLE_O
     };
-    let label = format!("{badge}  {}", chapter.display_title);
+    let label = format!("{icon}  {}", chapter.display_title);
     let mut text = RichText::new(label);
     if !in_manuscript {
         text = text.italics().color(theme::TEXT_MUTED);
@@ -256,35 +256,49 @@ fn draw_chapter_row(
     // drag-only widget. Opening the chapter goes through the explicit "open"
     // button on the right instead, which sits on top of the drag layer.
     let row_response = ui.horizontal(|ui| {
+        if in_manuscript {
+            ui.label(RichText::new(icons::BARS).color(theme::TEXT_MUTED).small())
+                .on_hover_text("Drag to reorder");
+        }
         // Selectable_label is purely visual here — clicks are intercepted by
         // the dnd_drag_source wrapper above. We keep it for the selected-row
         // background highlight; the open button below is what actually opens.
         let _ = ui.selectable_label(is_current, text);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("open").clicked() {
+            if ui
+                .small_button(icons::PENCIL)
+                .on_hover_text("Open chapter")
+                .clicked()
+            {
                 pending.open = Some(chapter.file_path.clone());
             }
         });
     });
 
     row_response.response.context_menu(|ui| {
-        if ui.button("Open").clicked() {
+        if ui.button(format!("{}  Open", icons::PENCIL)).clicked() {
             pending.open = Some(chapter.file_path.clone());
             ui.close_menu();
         }
         ui.separator();
         if in_manuscript {
-            if ui.button("Exclude from manuscript").clicked() {
+            if ui
+                .button(format!("{}  Exclude from manuscript", icons::CIRCLE_O))
+                .clicked()
+            {
                 pending.exclude = Some((chapter.folder.clone(), chapter.name.clone()));
                 ui.close_menu();
             }
-        } else if ui.button("Include in manuscript").clicked() {
+        } else if ui
+            .button(format!("{}  Include in manuscript", icons::CIRCLE))
+            .clicked()
+        {
             pending.include = Some((chapter.folder.clone(), chapter.name.clone()));
             ui.close_menu();
         }
         ui.separator();
         if ui
-            .button(RichText::new("Delete chapter").color(theme::ERROR))
+            .button(RichText::new(format!("{}  Delete chapter", icons::TRASH)).color(theme::ERROR))
             .clicked()
         {
             pending.delete_confirm = Some((chapter.folder.clone(), chapter.name.clone()));
@@ -308,8 +322,17 @@ fn draw_node(
         ui.add_space(depth as f32 * 12.0);
 
         if node.is_dir {
-            let chevron = if is_open { "▾" } else { "▸" };
-            let label = format!("{chevron}  {}", node.name);
+            let chevron = if is_open {
+                icons::CHEVRON_DOWN
+            } else {
+                icons::CHEVRON_RIGHT
+            };
+            let folder_icon = if is_open {
+                icons::FOLDER_OPEN
+            } else {
+                icons::FOLDER
+            };
+            let label = format!("{chevron}  {folder_icon}  {}", node.name);
             let text = RichText::new(label).color(theme::ACCENT).strong();
             if ui.selectable_label(false, text).clicked() {
                 pending.toggle_dir = Some(node.path.clone());
@@ -317,7 +340,8 @@ fn draw_node(
         } else {
             // Show the actual on-disk filename here; this tab is the raw
             // file view, distinct from the prettified Manuscript tab.
-            let mut text = RichText::new(format!("   {}", node.name)).color(theme::TEXT_MUTED);
+            let mut text = RichText::new(format!("    {}  {}", icons::FILE_TEXT, node.name))
+                .color(theme::TEXT_MUTED);
             if is_current {
                 text = text.color(Color32::WHITE).strong();
             }

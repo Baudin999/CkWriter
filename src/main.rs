@@ -2,6 +2,7 @@ mod app;
 mod book;
 mod diff;
 mod extract;
+mod icons;
 mod import;
 mod index;
 mod llm;

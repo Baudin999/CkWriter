@@ -1,4 +1,5 @@
 use crate::app::CkWriterApp;
+use crate::icons;
 use crate::theme;
 use egui::{Align, Color32, Layout, RichText};
 
@@ -23,17 +24,32 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Settings…").clicked() {
+            if ui
+                .button(format!("{}  Settings", icons::COG))
+                .on_hover_text("Settings")
+                .clicked()
+            {
                 app.show_settings = !app.show_settings;
             }
             ui.separator();
-            if ui.button("Open book…").clicked() {
+            if ui
+                .button(format!("{}  Open book", icons::FOLDER_OPEN))
+                .on_hover_text("Open book")
+                .clicked()
+            {
                 app.show_book_picker = true;
             }
             ui.separator();
-            let mode_label = if app.read_mode { "Write" } else { "Read" };
+            let (mode_icon, mode_text) = if app.read_mode {
+                (icons::PENCIL, "Write")
+            } else {
+                (icons::BOOK, "Read")
+            };
             if ui
-                .add_enabled(app.book.is_some(), egui::Button::new(mode_label))
+                .add_enabled(
+                    app.book.is_some(),
+                    egui::Button::new(format!("{mode_icon}  {mode_text}")),
+                )
                 .clicked()
             {
                 app.read_mode = !app.read_mode;
@@ -53,11 +69,18 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 }
             }
             ui.separator();
-            let diff_label = if app.diff_mode { "Edit" } else { "Diff" };
+            let (diff_icon, diff_text) = if app.diff_mode {
+                (icons::PENCIL, "Edit")
+            } else {
+                (icons::EXCHANGE, "Diff")
+            };
             let diff_enabled =
                 app.book.is_some() && app.current_chapter.is_some() && !app.read_mode;
             if ui
-                .add_enabled(diff_enabled, egui::Button::new(diff_label))
+                .add_enabled(
+                    diff_enabled,
+                    egui::Button::new(format!("{diff_icon}  {diff_text}")),
+                )
                 .clicked()
             {
                 app.diff_mode = !app.diff_mode;
