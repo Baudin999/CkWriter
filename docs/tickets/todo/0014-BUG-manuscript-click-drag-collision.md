@@ -34,3 +34,16 @@ The writer's mental model is: a quick click selects/opens a chapter, a deliberat
 - 500 ms is the proposed default. Tunable to 400/600 ms if it feels off in practice; record the final value in a constant in `src/ui/file_tree.rs` with a one-line rationale.
 - egui has no built-in "long-press → drag" widget; expect to track a per-row `Id`-keyed timestamp in `egui::Memory` (pointer-down time) and only enter `dnd_drag_source` once `now - press_time >= 500ms` OR pointer movement exceeds `ctx.input(|i| i.pointer.is_decidedly_dragging())`.
 - The trailing drop zone after the last row (`src/ui/file_tree.rs:166`) does not need changes — it has no click semantics to collide with.
+
+## Status notes
+Parked 2026-05-04 — code complete, awaiting visual confirmation.
+
+Done:
+- `manuscript_row_with_long_press_drag` helper in `src/ui/file_tree.rs` replaces the unconditional `dnd_drag_source` wrapper (commit `7736233`).
+- Per-row press timer in `egui::Memory` engages drag at ≥500 ms or on pointer movement; click otherwise. Click suppressed when long-press fired so a cancelled hold doesn't reopen the chapter.
+- Per-row Open pencil button removed for manuscript rows; orphan rows keep theirs.
+- Row scope set to `ui.set_min_width(ui.available_width())` so the card spans full sidebar width; BARS handle rendered without `.small()` so it shares the title line height (commit `89040b7`).
+- `cargo clippy --all-targets --all-features` and `cargo test --all-targets --all-features`: 0 warnings, 0 errors, 190 tests passing.
+
+Awaiting:
+- Visual confirmation in a real session that quick-click opens, hold-or-drag reorders, cancelled drag does not open, drop targets unchanged, row width and handle position look right. Once confirmed, tick the ACs and move to `done/`.
