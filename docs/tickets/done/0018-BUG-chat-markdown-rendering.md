@@ -28,12 +28,12 @@ This isn't a model-prompting problem (asking the model to "write plain text" los
 - A user-facing toggle "render markdown / show raw."
 
 ## Acceptance criteria
-- [ ] Sending a chat reply that contains a bullet list renders as a visual list, not raw `- ` characters.
-- [ ] **Bold** and *italic* render as bold and italic, not with the asterisks visible.
-- [ ] Fenced code blocks render in a monospace font with a distinguishing background; inline `code` renders in monospace inline.
-- [ ] Streaming partial markdown renders incrementally and doesn't visibly re-flow the entire bubble on every token (best-effort — re-flow is acceptable, full repaint stutter is not).
-- [ ] User messages also support markdown (the writer may paste it; consistent rendering is simpler than role-conditional rendering).
-- [ ] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+- [x] Sending a chat reply that contains a bullet list renders as a visual list, not raw `- ` characters.
+- [x] **Bold** and *italic* render as bold and italic, not with the asterisks visible.
+- [x] Fenced code blocks render in a monospace font with a distinguishing background; inline `code` renders in monospace inline.
+- [x] Streaming partial markdown renders incrementally and doesn't visibly re-flow the entire bubble on every token (best-effort — re-flow is acceptable, full repaint stutter is not).
+- [x] User messages also support markdown (the writer may paste it; consistent rendering is simpler than role-conditional rendering).
+- [x] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
 
 ## Design notes
 - `egui_commonmark` (a maintained crate) is the obvious candidate. Add it to `Cargo.toml` and feature-gate if it pulls in unwanted deps. Verify its license is compatible.
