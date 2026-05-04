@@ -271,7 +271,14 @@ fn manuscript_row_with_long_press_drag<R>(
         return false;
     }
 
-    let inner = ui.scope(add_contents);
+    // Allocate the full sidebar width up front so the row's interactive rect
+    // (and the surrounding drop-zone frame) spans the whole list, not just
+    // the width of the chapter title — clicking empty space on a row should
+    // still register as a click.
+    let inner = ui.scope(|ui| {
+        ui.set_min_width(ui.available_width());
+        add_contents(ui)
+    });
     let response = ui
         .interact(inner.response.rect, id, egui::Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::Grab);
@@ -332,7 +339,9 @@ fn draw_chapter_row(
     // back to a small Open button on the right.
     let row_response = ui.horizontal(|ui| {
         if in_manuscript {
-            ui.label(RichText::new(icons::BARS).color(theme::TEXT_MUTED).small())
+            // Render the handle at body size (no `.small()`) so it shares the
+            // selectable_label's line height and centers cleanly on the row.
+            ui.label(RichText::new(icons::BARS).color(theme::TEXT_MUTED))
                 .on_hover_text("Drag to reorder");
         }
         let _ = ui.selectable_label(is_current, text);
