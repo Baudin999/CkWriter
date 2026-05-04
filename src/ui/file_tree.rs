@@ -337,6 +337,12 @@ fn draw_chapter_row(
     // click, so the selectable_label is purely a visual marker for the
     // selected row. For orphan rows there is no outer wrapper, so we fall
     // back to a small Open button on the right.
+    let badge = format!(
+        "¶ {} · {} w",
+        chapter.meta.paragraphs.len(),
+        format_thousands(chapter.meta.word_count),
+    );
+
     let row_response = ui.horizontal(|ui| {
         if in_manuscript {
             // Render the handle at body size (no `.small()`) so it shares the
@@ -345,17 +351,17 @@ fn draw_chapter_row(
                 .on_hover_text("Drag to reorder");
         }
         let _ = ui.selectable_label(is_current, text);
-        if !in_manuscript {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !in_manuscript
+                && ui
                     .small_button(icons::PENCIL)
                     .on_hover_text("Open chapter")
                     .clicked()
-                {
-                    pending.open = Some(chapter.file_path.clone());
-                }
-            });
-        }
+            {
+                pending.open = Some(chapter.file_path.clone());
+            }
+            ui.label(RichText::new(badge).color(theme::TEXT_MUTED).small());
+        });
     });
 
     row_response.response.context_menu(|ui| {
@@ -442,6 +448,21 @@ fn draw_node(
     }
 }
 
+/// Insert a thousands separator into a non-negative integer's decimal form.
+/// Avoids pulling in `num-format` for one display path.
+fn format_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
 fn apply_pending(app: &mut CkWriterApp, pending: PendingActions) {
     if let Some(p) = pending.toggle_dir {
         if !app.expanded_dirs.insert(p.clone()) {
@@ -486,4 +507,19 @@ fn apply_pending(app: &mut CkWriterApp, pending: PendingActions) {
         app.request_open_chapter(p);
     }
     let _ = manuscript::MANAGED_FOLDERS; // keep the import live in release builds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_thousands;
+
+    #[test]
+    fn format_thousands_inserts_commas_every_three_digits() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(7), "7");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1_000), "1,000");
+        assert_eq!(format_thousands(12_345), "12,345");
+        assert_eq!(format_thousands(1_234_567), "1,234,567");
+    }
 }
