@@ -20,6 +20,17 @@ struct CachedLayoutJob {
     job: LayoutJob,
 }
 
+/// Per-editor multi-click counter (#0016). Lives in `egui::Memory`, keyed by
+/// the editor `Id` extended with `"multi-click"`. Persists across frames but
+/// not across windows; egui's own counter caps at 3, so this is the source of
+/// truth for the 4-click paragraph step.
+#[derive(Clone, Copy)]
+struct MultiClickState {
+    last_time: f64,
+    last_pos: egui::Pos2,
+    count: u32,
+}
+
 /// Lower bound for the editor's prose column. The upper bound now comes from
 /// `Settings::editor_column_width` (#0020 pivot); this responsive minimum
 /// kicks in only when the window itself is narrower than the user's chosen
@@ -43,6 +54,17 @@ const GUTTER_GAP_PX: f32 = 8.0;
 /// rightmost icon and the dirty bar.
 const ICON_SIZE_PX: f32 = 14.0;
 const ICON_GAP_PX: f32 = 6.0;
+
+/// Time window for chained clicks to count as the same multi-click sequence
+/// (#0016). Slightly longer than egui's own 0.3 s default so 4-click reaches
+/// users with less practiced timing — the paragraph step is the new gesture
+/// and should be the easiest to land.
+const MULTI_CLICK_WINDOW_SECS: f64 = 0.4;
+/// Pointer drift tolerance between consecutive clicks before the counter
+/// resets (#0016). Matches egui's "is this still a click" feel — small enough
+/// that a deliberate move-and-click anywhere else starts fresh, large enough
+/// that hand jitter on a fast 4-click never breaks the chain.
+const MULTI_CLICK_RADIUS_PX: f32 = 3.0;
 
 /// Pipeline labels considered for the per-paragraph dirty gutter. Voice is
 /// chapter-level so it's excluded by design (#0023). Kept in sync with
@@ -236,6 +258,70 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
 
                 if let Some(range) = output.cursor_range {
                     cursor_char = Some(range.primary.ccursor.index);
+                }
+
+                // 4-click → select paragraph (#0016). 1/2/3 clicks are handled
+                // by egui's TextEdit (cursor / word / line). egui caps its
+                // own click counter at 3, so for the paragraph step we keep a
+                // tiny counter in `Memory` keyed on the editor `Id`. Reset
+                // after `MULTI_CLICK_WINDOW_SECS` of pointer idle, or when
+                // the click drifts more than `MULTI_CLICK_RADIUS_PX` from
+                // the prior position. Paragraph boundaries are blank lines
+                // OR the literal `\nl` token — see `paragraph_char_range_at`.
+                if response.clicked() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let now = ui.ctx().input(|i| i.time);
+                        let multi_id = editor_id.with("multi-click");
+                        let prior: Option<MultiClickState> = ui
+                            .ctx()
+                            .memory(|m| m.data.get_temp(multi_id));
+                        let count = match prior {
+                            Some(s)
+                                if now - s.last_time < MULTI_CLICK_WINDOW_SECS
+                                    && s.last_pos.distance(pos)
+                                        < MULTI_CLICK_RADIUS_PX =>
+                            {
+                                s.count + 1
+                            }
+                            _ => 1,
+                        };
+                        ui.ctx().memory_mut(|m| {
+                            m.data.insert_temp(
+                                multi_id,
+                                MultiClickState {
+                                    last_time: now,
+                                    last_pos: pos,
+                                    count,
+                                },
+                            );
+                        });
+
+                        if count == 4 {
+                            let local = pos - output.galley_pos;
+                            if output.galley.rect.contains(local.to_pos2()) {
+                                let cursor =
+                                    output.galley.cursor_from_pos(local);
+                                let click_char = cursor.ccursor.index;
+                                let (start_char, end_char) =
+                                    paragraph_char_range_at(
+                                        &app.editor_text,
+                                        click_char,
+                                    );
+                                let mut state = TextEditState::load(
+                                    ui.ctx(),
+                                    editor_id,
+                                )
+                                .unwrap_or_default();
+                                state.cursor.set_char_range(Some(
+                                    CCursorRange::two(
+                                        CCursor::new(start_char),
+                                        CCursor::new(end_char),
+                                    ),
+                                ));
+                                state.store(ui.ctx(), editor_id);
+                            }
+                        }
+                    }
                 }
 
                 // After the TextEdit has rendered, we know exactly where the
@@ -911,6 +997,93 @@ fn byte_to_char(text: &str, byte_offset: usize) -> usize {
         clamped -= 1;
     }
     text[..clamped].chars().count()
+}
+
+/// True when `chars[i..i+3]` is the literal token `\nl` AND it stands alone
+/// as a LaTeX command — i.e. the preceding char isn't another backslash
+/// (so `\\nl` is rejected) and the following char isn't word-class (so
+/// `\nlong`, `\nlabel`, … don't match). Mirrors the `\b` boundary in
+/// `book::latex::to_prose`'s drop regex (#0016).
+fn is_nl_token_at(chars: &[char], i: usize) -> bool {
+    if i + 3 > chars.len() {
+        return false;
+    }
+    if chars[i] != '\\' || chars[i + 1] != 'n' || chars[i + 2] != 'l' {
+        return false;
+    }
+    if i > 0 && chars[i - 1] == '\\' {
+        return false;
+    }
+    if let Some(&c) = chars.get(i + 3) {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            return false;
+        }
+    }
+    true
+}
+
+/// Walk left from `click` to the first char of the paragraph the click is in.
+/// Boundaries: a preceding `\nl` token, a blank line (one `\n` followed only
+/// by horizontal whitespace then another `\n` or start-of-text), or
+/// start-of-text. Bounding token is excluded from the returned range.
+fn paragraph_start_char(chars: &[char], click: usize) -> usize {
+    let mut i = click.min(chars.len());
+    while i > 0 {
+        if i >= 3 && is_nl_token_at(chars, i - 3) {
+            return i;
+        }
+        if chars[i - 1] == '\n' {
+            let mut j = i - 1;
+            while j > 0 && chars[j - 1].is_whitespace() && chars[j - 1] != '\n' {
+                j -= 1;
+            }
+            if j == 0 || chars[j - 1] == '\n' {
+                return i;
+            }
+        }
+        i -= 1;
+    }
+    0
+}
+
+/// Walk right from `click` to the position just past the last char of the
+/// paragraph. Symmetric to `paragraph_start_char`: stops just before a `\nl`
+/// token, before a blank line, or at end-of-text.
+fn paragraph_end_char(chars: &[char], click: usize) -> usize {
+    let n = chars.len();
+    let mut i = click.min(n);
+    while i < n {
+        if is_nl_token_at(chars, i) {
+            return i;
+        }
+        if chars[i] == '\n' {
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() && chars[j] != '\n' {
+                j += 1;
+            }
+            if j == n || chars[j] == '\n' {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Resolve the paragraph that contains `click_char` and return its half-open
+/// char range `[start, end)`. Pure char-index logic — independent of the
+/// `book::paragraphs` splitter, which works on byte ranges and wraps
+/// `\begin{env}` blocks (out of scope for an interactive selection gesture).
+/// Returns `(0, 0)` for an empty buffer.
+fn paragraph_char_range_at(text: &str, click_char: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let click = click_char.min(chars.len());
+    let start = paragraph_start_char(&chars, click);
+    let end = paragraph_end_char(&chars, click).max(start);
+    (start, end)
 }
 
 /// Per-paragraph signal painted in the editor's left margin (#0023). Priority:
@@ -1841,5 +2014,157 @@ mod tests {
         let job = run_build_job(text, &[r], None);
         let section = section_for(&job, (5, 8));
         assert_eq!(section.format.underline.color, theme::REVISION_PROSE);
+    }
+
+    // --- Multi-click paragraph selection (#0016) --------------------------
+    //
+    // The 1/2/3-click steps are owned by upstream egui (cursor / word /
+    // line). We only test the 4-click paragraph step's range computation,
+    // because that's the only logic this crate adds. Click-counter cadence
+    // (400 ms / 3 px) is wired in the editor closure and exercised by hand
+    // — there's no headless egui harness here to drive pointer events.
+
+    /// Click anywhere in a single paragraph and the selection covers the
+    /// whole paragraph, excluding the trailing `\n`.
+    #[test]
+    fn paragraph_range_single_paragraph() {
+        let text = "the cat sat on the mat";
+        // Click somewhere in the middle.
+        let r = paragraph_char_range_at(text, 8);
+        assert_eq!(r, (0, text.chars().count()));
+    }
+
+    #[test]
+    fn paragraph_range_picks_paragraph_under_click() {
+        // Three paragraphs separated by blank lines. A click in the middle
+        // paragraph must select only the middle paragraph, neither sibling.
+        let text = "first paragraph.\n\nsecond paragraph.\n\nthird paragraph.";
+        // Click in "second" — find its char index.
+        let click = text.find("second").unwrap();
+        let (start, end) = paragraph_char_range_at(text, click + 1);
+        assert_eq!(&text[start..end], "second paragraph.");
+    }
+
+    #[test]
+    fn paragraph_range_blank_line_with_horizontal_whitespace() {
+        // A "blank line" can contain spaces and tabs — the splitter must
+        // still treat it as a paragraph break.
+        let text = "first.\n   \t  \nsecond.";
+        let click = text.find("second").unwrap();
+        let (start, end) = paragraph_char_range_at(text, click);
+        assert_eq!(&text[start..end], "second.");
+    }
+
+    #[test]
+    fn paragraph_range_excludes_trailing_newline() {
+        // The selection must stop at the `\n` of the paragraph, not include
+        // it — so a 4-click followed by Delete erases the paragraph but
+        // leaves the surrounding blank-line scaffold intact.
+        let text = "alpha\nbravo\n\ncharlie";
+        let (start, end) = paragraph_char_range_at(text, 0);
+        assert_eq!(&text[start..end], "alpha\nbravo");
+    }
+
+    #[test]
+    fn paragraph_range_clicks_before_nl_stop_at_nl() {
+        // `\nl` mid-paragraph is itself a paragraph boundary. A click on
+        // the prose before `\nl` selects only up to the token; the token
+        // and what follows belong to a separate paragraph. The token
+        // requires a word boundary on the right (matches the rest of the
+        // codebase's `\\nl\b` rule), hence the space after it.
+        let text = "alpha part. \\nl beta part.";
+        let click = text.find("alpha").unwrap() + 1;
+        let (start, end) = paragraph_char_range_at(text, click);
+        assert_eq!(&text[start..end], "alpha part. ");
+    }
+
+    #[test]
+    fn paragraph_range_clicks_after_nl_start_after_nl() {
+        let text = "alpha part. \\nl beta part.";
+        let click = text.find("beta").unwrap() + 1;
+        let (start, end) = paragraph_char_range_at(text, click);
+        assert_eq!(&text[start..end], " beta part.");
+    }
+
+    #[test]
+    fn paragraph_range_nl_at_start_or_end_of_buffer() {
+        let text = "\\nl only paragraph. \\nl";
+        let click = text.find("only").unwrap();
+        let (start, end) = paragraph_char_range_at(text, click);
+        assert_eq!(&text[start..end], " only paragraph. ");
+    }
+
+    #[test]
+    fn paragraph_range_ignores_word_extension_after_nl() {
+        // `\nlong` is a different command — it must NOT be treated as a
+        // paragraph break. Selection should span the whole buffer.
+        let text = "before \\nlong continuation here.";
+        let click = text.find("continuation").unwrap();
+        let (start, end) = paragraph_char_range_at(text, click);
+        assert_eq!(&text[start..end], text);
+    }
+
+    #[test]
+    fn paragraph_range_ignores_escaped_double_backslash_nl() {
+        // `\\nl` is `\\` (line break) followed by literal `nl` — not the
+        // `\nl` paragraph token. A click after it must still see one
+        // contiguous paragraph.
+        let text = "before \\\\nl after";
+        let click = text.find("after").unwrap();
+        let (start, end) = paragraph_char_range_at(text, click);
+        assert_eq!(&text[start..end], text);
+    }
+
+    #[test]
+    fn paragraph_range_empty_buffer_yields_empty_range() {
+        assert_eq!(paragraph_char_range_at("", 0), (0, 0));
+    }
+
+    #[test]
+    fn paragraph_range_clamps_overshooting_click() {
+        // A stale click index past the buffer must collapse to end-of-text
+        // rather than panic.
+        let text = "single paragraph";
+        let (start, end) = paragraph_char_range_at(text, 999);
+        assert_eq!((start, end), (0, text.chars().count()));
+    }
+
+    #[test]
+    fn paragraph_range_handles_multibyte_chars() {
+        // The helper indexes by char, not byte. A buffer with a
+        // multi-byte codepoint must still split on `\nl` correctly and
+        // return char indices.
+        let text = "café and tea \\nl rest of buffer";
+        let click_chars: usize = text[..text.find("café").unwrap() + 1].chars().count();
+        let (start, end) = paragraph_char_range_at(text, click_chars);
+        let chars: Vec<char> = text.chars().collect();
+        let selected: String = chars[start..end].iter().collect();
+        assert_eq!(selected, "café and tea ");
+    }
+
+    // --- \nl-token detection edge cases -----------------------------------
+
+    #[test]
+    fn nl_token_recognises_bare_token() {
+        let chars: Vec<char> = r"\nl".chars().collect();
+        assert!(is_nl_token_at(&chars, 0));
+    }
+
+    #[test]
+    fn nl_token_rejects_word_extension() {
+        let chars: Vec<char> = r"\nlong".chars().collect();
+        assert!(!is_nl_token_at(&chars, 0));
+    }
+
+    #[test]
+    fn nl_token_rejects_escaped_backslash() {
+        let chars: Vec<char> = r"\\nl".chars().collect();
+        assert!(!is_nl_token_at(&chars, 1));
+    }
+
+    #[test]
+    fn nl_token_accepts_followed_by_punctuation() {
+        let chars: Vec<char> = r"\nl{".chars().collect();
+        assert!(is_nl_token_at(&chars, 0));
     }
 }
