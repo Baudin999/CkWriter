@@ -40,3 +40,7 @@ This isn't a model-prompting problem (asking the model to "write plain text" los
 - If `egui_commonmark` won't work, a hand-rolled minimal renderer (paragraph + bullets + bold/italic + code) is acceptable for v1; missing features render as their underlying text.
 - Cache the parsed/rendered representation per message so the chat scroll area doesn't re-parse every frame. The pending assistant message is the only one that needs to re-parse on each token.
 - Picking a renderer is itself a small design decision worth recording in this ticket's notes when the choice is made.
+
+## Decisions
+
+- **2026-05-04 — Renderer:** `egui_commonmark = "0.20"` with `default-features = false` and `features = ["pulldown_cmark"]`. v0.20 is the line that targets egui 0.31; license MIT OR Apache-2.0 (compatible). Default-off drops `load-images` (we don't render images in chat) and avoids pulling in `egui_extras` image stack. The crate already exposes a `CommonMarkCache` for reusing parsed/laid-out output across frames, which satisfies the per-message caching requirement without us hand-rolling one.

@@ -160,6 +160,9 @@ pub struct CkWriterApp {
     /// Chapter the chat history was started against. Used to invalidate the
     /// transcript when the writer opens a different chapter.
     pub chat_chapter: Option<PathBuf>,
+    /// Re-used by `egui_commonmark` to skip re-parsing settled bubbles every
+    /// frame; only the in-flight `chat_pending_assistant` re-parses per token.
+    pub chat_md_cache: egui_commonmark::CommonMarkCache,
 
     // === Ollama health ===
     pub last_error: Option<String>,
@@ -310,6 +313,7 @@ impl CkWriterApp {
             chat_pending_assistant: String::new(),
             chat_error: None,
             chat_chapter: None,
+            chat_md_cache: egui_commonmark::CommonMarkCache::default(),
             last_error: None,
             ollama_ok: false,
             last_ollama_check: 0.0,

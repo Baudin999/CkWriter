@@ -1427,10 +1427,15 @@ fn show_chat(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 return;
             }
             for msg in &app.chat_messages {
-                chat_bubble(ui, &msg.role, &msg.content);
+                chat_bubble(ui, &msg.role, &msg.content, &mut app.chat_md_cache);
             }
             if !app.chat_pending_assistant.is_empty() {
-                chat_bubble(ui, "assistant", &app.chat_pending_assistant);
+                chat_bubble(
+                    ui,
+                    "assistant",
+                    &app.chat_pending_assistant,
+                    &mut app.chat_md_cache,
+                );
             }
         });
 
@@ -1467,7 +1472,12 @@ fn show_chat(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     }
 }
 
-fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
+fn chat_bubble(
+    ui: &mut egui::Ui,
+    role: &str,
+    content: &str,
+    md_cache: &mut egui_commonmark::CommonMarkCache,
+) {
     let (label, fg) = match role {
         "user" => ("you", theme::ACCENT),
         "assistant" => ("ai", theme::REVISION_VOICE),
@@ -1479,7 +1489,13 @@ fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(RichText::new(label).small().color(fg).strong());
-            ui.label(RichText::new(content).color(theme::TEXT_PRIMARY));
+            // Render the body as commonmark so the model's bullets, bold,
+            // italic, inline / fenced code, and small headings format instead
+            // of showing raw `- `, `**`, ``` source. The cache lives on the
+            // app so settled bubbles don't re-parse every frame; only the
+            // in-flight pending-assistant message re-parses per token, which
+            // it has to anyway because its text grows.
+            egui_commonmark::CommonMarkViewer::new().show(ui, md_cache, content);
         });
     ui.add_space(4.0);
 }
