@@ -23,12 +23,12 @@ The whole chapter still needs to be in the model's context so voice consistency,
 - A separate "focus" pipeline kind — focus is an option on the existing pipelines, not a fifth one
 
 ## Acceptance criteria
-- [ ] With the cursor inside a paragraph, pressing a pipeline's "this paragraph" button runs the pipeline and produces flags only for that paragraph
-- [ ] Off-target flags from the model are dropped with a log line (no panel pollution)
-- [ ] The full chapter is still in the prompt — verify by inspecting the logged `prose_chars`
-- [ ] Voice score is *not* updated when running in focus mode (the score is chapter-level)
-- [ ] Locked paragraph (#0005) → focus run for that paragraph is disabled
-- [ ] `cargo clippy` and `cargo test` clean
+- [x] With the cursor inside a paragraph, pressing a pipeline's "this paragraph" button runs the pipeline and produces flags only for that paragraph
+- [x] Off-target flags from the model are dropped with a log line (no panel pollution)
+- [x] The full chapter is still in the prompt — verify by inspecting the logged `prose_chars`
+- [x] Voice score is *not* updated when running in focus mode (the score is chapter-level)
+- [x] Locked paragraph (#0005) → focus run for that paragraph is disabled
+- [x] `cargo clippy` and `cargo test` clean
 
 ## Design notes
 - Why pass the full chapter for a single-paragraph ask? Voice and show-don't-tell flags depend on chapter-level pacing and tone; cutting context to one paragraph degrades quality. The cost is unchanged context tokens; the win is fewer output flags and tighter focus.

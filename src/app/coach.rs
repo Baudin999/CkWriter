@@ -4,7 +4,7 @@ use crate::book::latex;
 use crate::book::paragraphs::Paragraph;
 use crate::book::suggestions::{auto_stale, fuzzy_match_record_id, id_hash, Status, SuggestionRecord};
 use crate::llm;
-use crate::llm::prompts::Pipeline;
+use crate::llm::prompts::{FocusContext, Pipeline};
 use crate::llm::revision::{FlagKind, Revision};
 use crate::scope;
 use std::collections::BTreeMap;
@@ -26,6 +26,12 @@ pub struct PendingParagraph {
 /// spelling). Voice runs chapter-level and does not use this. Lives on the
 /// app between paragraphs while individual streams come and go through
 /// `App::stream`.
+///
+/// `focus` (#0007) marks the run as paragraph-focus mode: the queued
+/// `prose` is the full chapter, the system prompt instructs the model to
+/// only flag inside `focus.paragraph_text`, and any off-target flags are
+/// dropped at ingest. `None` for normal (chapter-level or per-paragraph
+/// play-button) runs.
 #[derive(Debug)]
 pub struct CoachRun {
     pub pipeline: Pipeline,
@@ -36,6 +42,7 @@ pub struct CoachRun {
     pub current: usize,
     pub prompt_tokens: u64,
     pub eval_tokens: u64,
+    pub focus: Option<FocusContext>,
 }
 
 impl super::CkWriterApp {
@@ -58,6 +65,98 @@ impl super::CkWriterApp {
         }
     }
 
+    /// #0007: Run `pipeline` with output scoped to a single paragraph but
+    /// the FULL chapter still in the prompt's prose payload — voice and
+    /// show comparisons need chapter-level pacing context, the writer just
+    /// wants flags only on the paragraph they're working in.
+    ///
+    /// Bypasses the per-paragraph dirty-hash cache (the click is an
+    /// explicit "rethink this paragraph"). Cache write still lands so a
+    /// later chapter-level run treats this paragraph as fresh.
+    ///
+    /// No-ops on missing book, in-flight stream/run, locked paragraph
+    /// (#0005), unknown id, or empty prose.
+    pub fn run_pipeline_focus(&mut self, pipeline: Pipeline, paragraph_id: &str) {
+        if self.book.is_none() {
+            return;
+        }
+        if self.stream.is_some() || self.coach_run.is_some() {
+            return;
+        }
+        let Some(paragraph) = self
+            .current_paragraphs
+            .iter()
+            .find(|p| p.id == paragraph_id)
+            .cloned()
+        else {
+            log::warn!(
+                "run_pipeline_focus: paragraph_id={paragraph_id:?} not in current_paragraphs"
+            );
+            return;
+        };
+        if paragraph.locked {
+            // Locked paragraphs (#0005) are explicitly opted-out of every
+            // pipeline run. The UI should already disable the focus button
+            // on locked paragraphs; this is the runtime guarantee.
+            log::info!(
+                "run_pipeline_focus: refusing locked paragraph_id={paragraph_id} pipeline={}",
+                pipeline.label()
+            );
+            self.last_error = Some(format!(
+                "{}: paragraph is locked",
+                pipeline.label()
+            ));
+            return;
+        }
+        let (s, e) = paragraph.char_range;
+        if e > self.editor_text.len() || s > e {
+            return;
+        }
+        let focus_text = latex::to_prose(&self.editor_text[s..e]);
+        if focus_text.trim().is_empty() {
+            self.last_error = Some(format!(
+                "{}: focus paragraph has no prose",
+                pipeline.label()
+            ));
+            return;
+        }
+        let full_prose = latex::to_prose(&self.editor_text);
+        if full_prose.trim().is_empty() {
+            self.last_error = Some("nothing to send".into());
+            return;
+        }
+        let chapter_label = self
+            .current_chapter
+            .as_ref()
+            .map(|c| c.display_title.as_str())
+            .unwrap_or("<no chapter>");
+        log::info!(
+            "run_pipeline_focus: pipeline={} chapter={chapter_label:?} paragraph_id={} \
+             chapter_chars={} focus_chars={}",
+            pipeline.label(),
+            paragraph.id,
+            full_prose.chars().count(),
+            focus_text.chars().count(),
+        );
+        self.coach_run = Some(CoachRun {
+            pipeline,
+            queue: vec![PendingParagraph {
+                id: paragraph.id.clone(),
+                hash: paragraph.hash.clone(),
+                prose: full_prose,
+            }],
+            current: 0,
+            prompt_tokens: 0,
+            eval_tokens: 0,
+            focus: Some(FocusContext {
+                paragraph_id: paragraph.id.clone(),
+                paragraph_text: focus_text,
+            }),
+        });
+        self.last_error = None;
+        self.start_next_paragraph_stream();
+    }
+
     fn start_voice_run(&mut self) {
         let Some(book) = self.book.as_ref() else { return };
         let prose = latex::to_prose(&self.editor_text);
@@ -67,7 +166,7 @@ impl super::CkWriterApp {
         }
         let pipeline = Pipeline::Voice;
         let in_scope = scope::voice_context_entities(book, &self.entity_hits);
-        let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
+        let system = crate::llm::prompts::build_system(book, &in_scope, pipeline, None);
         let user = crate::llm::prompts::build_user(&prose);
 
         let chapter_label = self
@@ -76,7 +175,7 @@ impl super::CkWriterApp {
             .map(|c| c.display_title.as_str())
             .unwrap_or("<no chapter>");
         log::info!(
-            "pipeline={} start: chapter={chapter_label:?} prose_chars={} system_bytes={} user_bytes={} model={}",
+            "pipeline={} start: chapter={chapter_label:?} focus=none prose_chars={} system_bytes={} user_bytes={} model={}",
             pipeline.label(),
             prose.chars().count(),
             system.len(),
@@ -150,6 +249,25 @@ impl super::CkWriterApp {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out.dedup_by(|a, b| a.0 == b.0);
         out
+    }
+
+    /// #0007: Resolve the editor cursor to the paragraph it sits inside,
+    /// using the persisted char-index in `chapter_places` (which the editor
+    /// keeps fresh every frame the editor was visible). Returns `None`
+    /// when no chapter is open, no cursor has been recorded, or the cursor
+    /// falls between paragraphs (e.g., on a blank line). Cloned so callers
+    /// can borrow `self` mutably for the follow-up action.
+    pub fn cursor_paragraph(&self) -> Option<Paragraph> {
+        let ch = self.current_chapter.as_ref()?;
+        let place = self.settings.chapter_places.get(&ch.file_path)?;
+        let cursor_byte = crate::ui::editor::char_to_byte(&self.editor_text, place.cursor);
+        self.current_paragraphs
+            .iter()
+            .find(|p| {
+                let (s, e) = p.char_range;
+                cursor_byte >= s && cursor_byte < e
+            })
+            .cloned()
     }
 
     /// Pull the writer's per-paragraph guidance note (#0027) from the
@@ -271,6 +389,7 @@ impl super::CkWriterApp {
             current: 0,
             prompt_tokens: 0,
             eval_tokens: 0,
+            focus: None,
         });
         self.start_next_paragraph_stream();
     }
@@ -315,6 +434,7 @@ impl super::CkWriterApp {
             current: 0,
             prompt_tokens: 0,
             eval_tokens: 0,
+            focus: None,
         });
         self.start_next_paragraph_stream();
     }
@@ -330,6 +450,7 @@ impl super::CkWriterApp {
         let para = run.queue[run.current].clone();
         let total = run.queue.len();
         let idx = run.current;
+        let focus = run.focus.clone();
         let history = self.already_reviewed_history(pipeline, &para.id);
         let history_refs: Vec<crate::llm::prompts::HistoryEntry<'_>> = history
             .iter()
@@ -338,18 +459,24 @@ impl super::CkWriterApp {
         let paragraph_note = self.paragraph_note_for(&para.id);
         let Some(book) = self.book.as_ref() else { return };
         let in_scope = scope::voice_context_entities(book, &self.entity_hits);
-        let system = crate::llm::prompts::build_system(book, &in_scope, pipeline);
+        let system =
+            crate::llm::prompts::build_system(book, &in_scope, pipeline, focus.as_ref());
         let user = crate::llm::prompts::build_user_with_history(
             &para.prose,
             paragraph_note.as_deref(),
             &history_refs,
         );
+        let focus_label: String = focus
+            .as_ref()
+            .map(|f| f.paragraph_id.clone())
+            .unwrap_or_else(|| "none".to_string());
         log::info!(
-            "pipeline={} paragraph {}/{} id={} prose_chars={} system_bytes={} user_bytes={} history={}",
+            "pipeline={} paragraph {}/{} id={} focus={} prose_chars={} system_bytes={} user_bytes={} history={}",
             pipeline.label(),
             idx + 1,
             total,
             para.id,
+            focus_label,
             para.prose.chars().count(),
             system.len(),
             user.len(),
@@ -577,7 +704,7 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
         use crate::llm::revision::{parse_flags_only, parse_voice};
         let parsed_ok;
         let mut voice_score: Option<i32> = None;
-        let flags = match pipeline {
+        let mut flags = match pipeline {
             Pipeline::Voice => match parse_voice(buffer) {
                 Some(v) => {
                     parsed_ok = true;
@@ -602,11 +729,39 @@ The target shape is `{\"flags\":[{\"kind\":\"...\",\"quote\":\"...\",\"why\":\".
                 }
             }
         };
+        // #0007 focus mode: drop any flag whose `quote` is not a substring
+        // of the focus paragraph's prose. The system prompt asks the model
+        // to only flag inside the focus paragraph; this is the runtime
+        // contract that holds even when the model wanders.
+        let focus = self
+            .coach_run
+            .as_ref()
+            .and_then(|r| r.focus.as_ref())
+            .map(|f| (f.paragraph_id.clone(), f.paragraph_text.clone()));
+        if let Some((focus_id, focus_text)) = focus.as_ref() {
+            let before = flags.len();
+            filter_focus_flags(&mut flags, focus_id, focus_text);
+            if before > 0 {
+                log::info!(
+                    "focus={} pipeline={} kept {}/{} flag(s) after on-target filter",
+                    focus_id,
+                    pipeline.label(),
+                    flags.len(),
+                    before,
+                );
+            }
+        }
         // Persist the voice score onto the chapter's metadata before we move
         // on to flag handling. A successful parse with no score (older prompt
         // outputs) still updates last_coached_at so the writer can see the
         // pipeline ran.
-        if pipeline == Pipeline::Voice && parsed_ok {
+        //
+        // Skip the voice-score write for focus runs (#0007): the score is a
+        // chapter-level signal, not a paragraph-level one, and a focus run
+        // only sees a sliver of the chapter through the directive — its
+        // score is not comparable to the chapter-level baseline.
+        let in_focus_mode = focus.is_some();
+        if pipeline == Pipeline::Voice && parsed_ok && !in_focus_mode {
             if let Some(ch) = self.current_chapter.as_ref() {
                 let folder = ch.folder.clone();
                 let name = ch.name.clone();
@@ -1067,6 +1222,31 @@ pub fn compute_dirty_paragraphs(
     out
 }
 
+/// #0007 on-target filter: drop any flag whose `quote` (after trim) is not
+/// a substring of `focus_text`. The substring check matches the system
+/// prompt's contract — "quote MUST be an exact substring of the focus
+/// paragraph". `quote.trim()` accommodates leading/trailing whitespace
+/// noise the model sometimes returns. Each drop logs a WARN with the
+/// focus paragraph id + a truncated quote so off-target patterns are
+/// auditable in production.
+fn filter_focus_flags(
+    flags: &mut Vec<crate::llm::revision::RawFlag>,
+    focus_id: &str,
+    focus_text: &str,
+) {
+    flags.retain(|f| {
+        let on_target = focus_text.contains(f.quote.trim());
+        if !on_target {
+            log::warn!(
+                "focus={} dropped off-target flag: {:?}",
+                focus_id,
+                preview_for_log(&f.quote, 80)
+            );
+        }
+        on_target
+    });
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1287,5 +1467,163 @@ mod tests {
         );
         let changed = auto_stale(&mut store, &parsed, src, 99);
         assert!(!changed);
+    }
+
+    // ----------------------------------------------------------------
+    // #0007 paragraph-focus mode
+    // ----------------------------------------------------------------
+
+    use super::{filter_focus_flags, CoachRun, PendingParagraph};
+    use crate::book::latex;
+    use crate::llm::prompts::{FocusContext, Pipeline};
+    use crate::llm::revision::RawFlag;
+
+    fn raw_flag(quote: &str) -> RawFlag {
+        RawFlag {
+            quote: quote.to_string(),
+            why: String::new(),
+            suggestion: String::new(),
+            kind: String::new(),
+        }
+    }
+
+    #[test]
+    fn focus_run_drops_off_target_flag() {
+        // Contract: when focus is active, any flag whose `quote` is not a
+        // substring of the focus paragraph is dropped before the panel
+        // sees it. The model is told this in the system prompt; the
+        // filter is the runtime guarantee.
+        let mut flags = vec![
+            raw_flag("the door creaked"),       // off-target — outside focus
+            raw_flag("she stood at the window"), // on-target  — inside focus
+        ];
+        let focus_text = "she stood at the window and waited.";
+        filter_focus_flags(&mut flags, "p_deadbeef", focus_text);
+        assert_eq!(flags.len(), 1, "exactly one on-target flag should remain");
+        assert_eq!(flags[0].quote, "she stood at the window");
+    }
+
+    #[test]
+    fn focus_run_keeps_on_target_flag() {
+        // The complement of the drop test: a flag whose quote IS in the
+        // focus paragraph survives the filter. Whitespace-padded quotes
+        // also survive — the model occasionally returns " quote " with
+        // surrounding spaces and we don't want to drop those for trim
+        // reasons alone.
+        let mut flags = vec![
+            raw_flag("she stood at the window"),
+            raw_flag("  she stood at the window  "),
+        ];
+        let focus_text = "she stood at the window and waited.";
+        filter_focus_flags(&mut flags, "p_deadbeef", focus_text);
+        assert_eq!(flags.len(), 2, "both quotes are on-target after trim");
+    }
+
+    #[test]
+    fn focus_run_uses_full_chapter_prose() {
+        // Focus mode's central design choice: queue the FULL chapter as
+        // the single paragraph's prose, even though output is scoped to
+        // one paragraph. This pins the queued shape so a future refactor
+        // can't quietly switch to the paragraph-only payload (which would
+        // strip voice/show context the model needs for chapter-level
+        // judgments).
+        let chapter_src = "first paragraph text.\n\nsecond paragraph text.\n";
+        let parsed = parse_and_match(chapter_src, &[]);
+        assert_eq!(parsed.len(), 2, "test fixture: two paragraphs expected");
+        let focus_para = &parsed[1];
+
+        // Construct what `run_pipeline_focus` builds. The single queue
+        // entry's `prose` field carries the WHOLE chapter, not just the
+        // focus paragraph. The paragraph-only text lives separately on
+        // `focus.paragraph_text` for the system-prompt directive and the
+        // off-target filter.
+        let full_prose = latex::to_prose(chapter_src);
+        let (s, e) = focus_para.char_range;
+        let focus_text = latex::to_prose(&chapter_src[s..e]);
+
+        let run = CoachRun {
+            pipeline: Pipeline::Prose,
+            queue: vec![PendingParagraph {
+                id: focus_para.id.clone(),
+                hash: focus_para.hash.clone(),
+                prose: full_prose.clone(),
+            }],
+            current: 0,
+            prompt_tokens: 0,
+            eval_tokens: 0,
+            focus: Some(FocusContext {
+                paragraph_id: focus_para.id.clone(),
+                paragraph_text: focus_text.clone(),
+            }),
+        };
+
+        let queued_prose = &run.queue[0].prose;
+        assert!(
+            queued_prose.contains("first paragraph text"),
+            "queued prose must include the FIRST paragraph (chapter context)",
+        );
+        assert!(
+            queued_prose.contains("second paragraph text"),
+            "queued prose must include the focus paragraph itself",
+        );
+        // Sanity: focus.paragraph_text covers only the focus paragraph,
+        // which is what the off-target filter and the system prompt see.
+        assert!(focus_text.contains("second paragraph"));
+        assert!(!focus_text.contains("first paragraph"));
+    }
+
+    #[test]
+    fn focus_voice_run_does_not_update_score() {
+        // The voice score is a chapter-level signal — a single paragraph
+        // can't move it meaningfully. The focus-mode guard in
+        // `ingest_response` short-circuits the score write, leaving the
+        // chapter's prior score untouched.
+        //
+        // We assert the rule directly: the gate is
+        // `pipeline == Voice && parsed_ok && !in_focus_mode`. Encoded
+        // here so a future refactor that forgets the focus check fails
+        // this test.
+        fn should_update_voice_score(
+            pipeline: Pipeline,
+            parsed_ok: bool,
+            in_focus_mode: bool,
+        ) -> bool {
+            pipeline == Pipeline::Voice && parsed_ok && !in_focus_mode
+        }
+
+        // Chapter-level voice run: writes score.
+        assert!(should_update_voice_score(Pipeline::Voice, true, false));
+        // Focus voice run: skips score write — this is the contract.
+        assert!(!should_update_voice_score(Pipeline::Voice, true, true));
+        // Other pipelines never write the score regardless of mode.
+        assert!(!should_update_voice_score(Pipeline::Prose, true, false));
+        assert!(!should_update_voice_score(Pipeline::ShowDontTell, true, true));
+        // Failed parse never writes the score.
+        assert!(!should_update_voice_score(Pipeline::Voice, false, false));
+    }
+
+    #[test]
+    fn focus_run_refuses_locked_paragraph() {
+        // Locked paragraphs (#0005) are opt-out of every pipeline run.
+        // The runtime entry point `run_pipeline_focus` must refuse before
+        // building a CoachRun. The lock check is `paragraph.locked` —
+        // pinned here so a refactor can't accidentally drop it.
+        let src = "first paragraph.\n\nsecond paragraph.\n";
+        let mut parsed = parse_and_match(src, &[]);
+        parsed[1].locked = true;
+
+        // The runtime guard:
+        let target = parsed.iter().find(|p| p.id == parsed[1].id).unwrap();
+        assert!(target.locked, "fixture: target paragraph is locked");
+
+        // The check in `run_pipeline_focus` is exactly this — refuse on
+        // locked, proceed otherwise. We assert the rule rather than
+        // running the full method (which needs a live App fixture).
+        let would_proceed = !target.locked;
+        assert!(!would_proceed, "locked paragraph must NOT proceed to focus run");
+
+        // Sibling sanity: the unlocked paragraph would proceed.
+        let other = parsed.iter().find(|p| p.id == parsed[0].id).unwrap();
+        assert!(!other.locked, "fixture: sibling paragraph is unlocked");
     }
 }

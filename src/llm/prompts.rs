@@ -33,7 +33,24 @@ impl Pipeline {
     }
 }
 
-pub fn build_system(book: &Book, in_scope: &[&Entity], pipeline: Pipeline) -> String {
+/// Per-paragraph scope for focus-mode coaching (#0007). When threaded into
+/// [`build_system`], the prose payload still carries the full chapter (so
+/// voice / show comparisons keep their context) but the model is instructed
+/// to only emit flags that anchor inside `paragraph_text`. The runtime drops
+/// any off-target flag the model sneaks past the directive — the prompt
+/// suffix is best-effort, the ingest filter is the contract.
+#[derive(Debug, Clone)]
+pub struct FocusContext {
+    pub paragraph_id: String,
+    pub paragraph_text: String,
+}
+
+pub fn build_system(
+    book: &Book,
+    in_scope: &[&Entity],
+    pipeline: Pipeline,
+    focus: Option<&FocusContext>,
+) -> String {
     // Mechanics-only pipelines (prose, spelling) get a lean system prompt.
     // The book voice prompt + roadmap + cast preamble used by voice/show was
     // pulling these runs toward freeform critique and breaking JSON mode.
@@ -84,6 +101,27 @@ pub fn build_system(book: &Book, in_scope: &[&Entity], pipeline: Pipeline) -> St
         Pipeline::Prose => PROSE_INSTRUCTIONS,
         Pipeline::Spelling => SPELLING_INSTRUCTIONS,
     });
+
+    // #0007: paragraph-focus directive. Always appended LAST so prior
+    // pipeline instructions stay intact. `focus = None` collapses to a
+    // no-op so chapter-level callers stay byte-identical.
+    if let Some(fc) = focus {
+        s.push_str("\n\n## Focus paragraph\n\n");
+        s.push_str(
+            "The prose below is the WHOLE chapter — it is included so you can judge \
+             voice, pacing, and continuity in context. However, you must ONLY emit \
+             flags whose `quote` is an exact substring of the focus paragraph below. \
+             Do not flag any prose outside the focus paragraph; off-target flags will \
+             be dropped.\n\n",
+        );
+        s.push_str(&format!("Focus paragraph id: {}\n\n", fc.paragraph_id));
+        s.push_str("Focus paragraph text:\n```\n");
+        s.push_str(&fc.paragraph_text);
+        if !fc.paragraph_text.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str("```\n");
+    }
 
     s
 }
@@ -266,6 +304,104 @@ pub fn build_user_with_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book::data::BookData;
+    use crate::book::entity::Entities;
+    use crate::book::manuscript::Manuscript;
+    use crate::book::suggestions::SuggestionStore;
+    use crate::book::tree::FileNode;
+    use crate::book::{Book, BookConfig};
+    use std::path::PathBuf;
+
+    /// Minimal `Book` with empty voice prompt, roadmap, and entities — just
+    /// enough for `build_system` to produce its non-context-bearing prompt
+    /// suffix. Real chapters/manuscripts/entities are not exercised here;
+    /// the focus-mode contract is independent of book content.
+    fn empty_book() -> Book {
+        Book {
+            root: PathBuf::new(),
+            main_tex: PathBuf::new(),
+            chapters: Vec::new(),
+            manuscript: Manuscript::default(),
+            file_tree: FileNode {
+                name: String::new(),
+                path: PathBuf::new(),
+                is_dir: true,
+                children: Vec::new(),
+            },
+            entities: Entities::default(),
+            voice_prompt: String::new(),
+            roadmap: String::new(),
+            config: BookConfig::default(),
+            data: BookData::default(),
+            suggestions: SuggestionStore::default(),
+        }
+    }
+
+    #[test]
+    fn build_system_no_focus_byte_identical_to_legacy() {
+        // Contract for chapter-level callers (#0007 design): passing
+        // `focus = None` must produce a prompt that does NOT include the
+        // focus-mode suffix. The chapter-level behavior of every existing
+        // pipeline depends on the prompt being identical to the pre-focus
+        // version when no focus is set.
+        let book = empty_book();
+        for pipeline in [
+            Pipeline::Voice,
+            Pipeline::ShowDontTell,
+            Pipeline::Prose,
+            Pipeline::Spelling,
+        ] {
+            let s = build_system(&book, &[], pipeline, None);
+            assert!(
+                !s.contains("## Focus paragraph"),
+                "focus=None must not append the focus directive for pipeline={:?}; got:\n{s}",
+                pipeline,
+            );
+            assert!(
+                !s.contains("Focus paragraph id:"),
+                "focus=None must not mention a paragraph id; got:\n{s}",
+            );
+        }
+    }
+
+    #[test]
+    fn build_system_focus_appends_directive_with_paragraph_text() {
+        // With `Some(FocusContext)`, the suffix MUST contain (a) the focus
+        // section header, (b) the paragraph id, and (c) the verbatim
+        // paragraph text. The text appears inside a fenced block so the
+        // model can locate the boundary unambiguously even when the prose
+        // contains markdown-like punctuation.
+        let book = empty_book();
+        let fc = FocusContext {
+            paragraph_id: "p_deadbeef".to_string(),
+            paragraph_text: "She stood at the door and waited.".to_string(),
+        };
+        let s = build_system(&book, &[], Pipeline::Prose, Some(&fc));
+        assert!(
+            s.contains("## Focus paragraph"),
+            "focus directive header missing in:\n{s}",
+        );
+        assert!(
+            s.contains("Focus paragraph id: p_deadbeef"),
+            "focus paragraph id missing in:\n{s}",
+        );
+        assert!(
+            s.contains("She stood at the door and waited."),
+            "focus paragraph text missing in:\n{s}",
+        );
+        // Suffix lands AFTER the pipeline instructions so the model sees
+        // the task definition first, then the constraint. Not the other
+        // way around.
+        let task_idx = s
+            .find("## Task")
+            .or_else(|| s.find("You are a prose-mechanics editor"))
+            .expect("pipeline instructions present");
+        let focus_idx = s.find("## Focus paragraph").unwrap();
+        assert!(
+            task_idx < focus_idx,
+            "focus directive must come AFTER the pipeline task: task={task_idx} focus={focus_idx}",
+        );
+    }
 
     #[test]
     fn legacy_no_history_no_note_matches_build_user() {

@@ -836,24 +836,54 @@ fn show_ai(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         });
 
     let busy = app.stream.is_some() || app.coach_run.is_some();
+    let chapter_ready = !busy && app.current_chapter.is_some() && app.ollama_ok;
+    ui.label(RichText::new("on chapter").small().color(theme::TEXT_MUTED));
     ui.horizontal_wrapped(|ui| {
-        ui.add_enabled_ui(
-            !busy && app.current_chapter.is_some() && app.ollama_ok,
-            |ui| {
-                if ui.button("voice").clicked() {
-                    app.run_pipeline(Pipeline::Voice);
-                }
-                if ui.button("show, don't tell").clicked() {
-                    app.run_pipeline(Pipeline::ShowDontTell);
-                }
-                if ui.button("prose").clicked() {
-                    app.run_pipeline(Pipeline::Prose);
-                }
-                if ui.button("spelling").clicked() {
-                    app.run_pipeline(Pipeline::Spelling);
-                }
-            },
-        );
+        ui.add_enabled_ui(chapter_ready, |ui| {
+            if ui.button("voice").clicked() {
+                app.run_pipeline(Pipeline::Voice);
+            }
+            if ui.button("show, don't tell").clicked() {
+                app.run_pipeline(Pipeline::ShowDontTell);
+            }
+            if ui.button("prose").clicked() {
+                app.run_pipeline(Pipeline::Prose);
+            }
+            if ui.button("spelling").clicked() {
+                app.run_pipeline(Pipeline::Spelling);
+            }
+        });
+    });
+
+    // #0007 paragraph-focus row: same four pipelines, scoped to the
+    // paragraph the cursor is in. Disabled when the cursor isn't inside an
+    // eligible paragraph (no chapter / blank line / locked paragraph).
+    let focus_paragraph = app.cursor_paragraph();
+    let focus_id = focus_paragraph.as_ref().map(|p| p.id.clone());
+    let focus_locked = focus_paragraph.as_ref().is_some_and(|p| p.locked);
+    let focus_ready = chapter_ready && focus_id.is_some() && !focus_locked;
+    let focus_label = match (&focus_id, focus_locked) {
+        (Some(id), false) => format!("on paragraph ({id})"),
+        (Some(_), true) => "on paragraph (locked — focus disabled)".to_string(),
+        (None, _) => "on paragraph (place cursor in a paragraph)".to_string(),
+    };
+    ui.label(RichText::new(focus_label).small().color(theme::TEXT_MUTED));
+    ui.horizontal_wrapped(|ui| {
+        ui.add_enabled_ui(focus_ready, |ui| {
+            let pid = focus_id.clone().unwrap_or_default();
+            if ui.button("voice").clicked() {
+                app.run_pipeline_focus(Pipeline::Voice, &pid);
+            }
+            if ui.button("show, don't tell").clicked() {
+                app.run_pipeline_focus(Pipeline::ShowDontTell, &pid);
+            }
+            if ui.button("prose").clicked() {
+                app.run_pipeline_focus(Pipeline::Prose, &pid);
+            }
+            if ui.button("spelling").clicked() {
+                app.run_pipeline_focus(Pipeline::Spelling, &pid);
+            }
+        });
     });
     if busy {
         let status = match &app.coach_run {

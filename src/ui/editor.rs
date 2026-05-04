@@ -980,7 +980,7 @@ fn build_job(
     job
 }
 
-fn char_to_byte(text: &str, char_index: usize) -> usize {
+pub(crate) fn char_to_byte(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
         .map(|(b, _)| b)
