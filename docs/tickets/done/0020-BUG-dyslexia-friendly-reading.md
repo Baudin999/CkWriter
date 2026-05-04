@@ -127,35 +127,38 @@ Section headers within the dialog: "Reading (app-wide)" and "Editor".
 - Bionic Reading-style first-half-bold — separate ticket.
 
 ## Acceptance criteria
-- [ ] Every proportional text surface in the app (chat input + bubbles,
+- [x] Every proportional text surface in the app (chat input + bubbles,
       coaching cards, chapter form fields, paragraph notes, inspector
       entity prose, settings dialog labels, list rows) renders in the
       chosen `reading_font` at `font_size_normal` for body, `font_size_info`
       for muted/`.small()`, `font_size_header` for any heading widget.
-- [ ] Monospace text (keyboard hints, any code-style spans) stays in
+- [x] Monospace text (keyboard hints, any code-style spans) stays in
       egui's default monospace family.
-- [ ] Editor uses the same `reading_font` + `font_size_normal`, plus its
+- [x] Editor uses the same `reading_font` + `font_size_normal`, plus its
       own `editor_line_height_mult` and `editor_letter_spacing`.
-- [ ] Editor column max width tracks the new `editor_column_width`
+- [x] Editor column max width tracks the new `editor_column_width`
       slider; the column responds to changes the same frame.
-- [ ] Settings dialog has the seven controls listed under
+- [x] Settings dialog has the seven controls listed under
       `### Settings dialog`, organized in two sections (app-wide vs.
       editor). All live-apply.
-- [ ] Defaults: font = Atkinson Hyperlegible, normal = 18 px,
+- [x] Defaults: font = Atkinson Hyperlegible, normal = 18 px,
       header = 22 px, info = 13 px, line-height = 1.7×,
       letter-spacing = 0.4 px, column-width = 760 px.
-- [ ] Atkinson and OpenDyslexic remain bundled under `assets/fonts/`.
-- [ ] Old `settings.toml` keys keep loading via aliases:
+- [x] Atkinson and OpenDyslexic remain bundled under `assets/fonts/`.
+- [x] Old `settings.toml` keys keep loading via aliases:
       `editor_font_size` → `font_size_normal`,
       `reading_font_size` → `font_size_normal`,
       `reading_line_height_mult` → `editor_line_height_mult`,
       `reading_letter_spacing` → `editor_letter_spacing`.
-- [ ] `MAX_COLUMN_WIDTH` const is gone (replaced by setting). `MIN_COLUMN_WIDTH`
+- [x] `MAX_COLUMN_WIDTH` const is gone (replaced by setting). `MIN_COLUMN_WIDTH`
       may remain as the responsive lower bound.
-- [ ] `cargo clippy --all-targets -- -D warnings` and `cargo test` both
+- [x] `cargo clippy --all-targets -- -D warnings` and `cargo test` both
       return zero errors and zero warnings.
 
 ## Status notes
+Second pass shipped 2026-05-04 in commit `e16765e`. User confirmed the
+visual result on Atkinson at the new defaults; closing.
+
 First pass (commit `9751dbf` on master) shipped:
 - Bundled Atkinson Hyperlegible + OpenDyslexic under `assets/fonts/`
   with OFL `LICENSE` files. **Keep.**
