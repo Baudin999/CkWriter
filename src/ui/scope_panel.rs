@@ -1390,7 +1390,7 @@ fn show_chat(app: &mut CkWriterApp, ui: &mut egui::Ui) {
 
     if busy {
         ui.label(
-            RichText::new("● thinking…")
+            RichText::new("● working…")
                 .small()
                 .color(theme::REVISION_VOICE),
         );
