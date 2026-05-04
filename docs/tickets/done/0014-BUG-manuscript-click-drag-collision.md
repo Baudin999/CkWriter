@@ -23,12 +23,12 @@ The writer's mental model is: a quick click selects/opens a chapter, a deliberat
 - Same treatment for non-manuscript rows (orphans, info files) — they already work correctly because they are not drag sources.
 
 ## Acceptance criteria
-- [ ] A pointer-down + pointer-up within 500 ms on a manuscript row opens that chapter (no need to aim for the "Open" button).
-- [ ] A pointer-down held for ≥500 ms (or moved ≥ egui's drag threshold) on a manuscript row begins a drag, with the same drop targets and reorder behavior as today.
-- [ ] Dragging onto another manuscript row drops before that row; dragging past the last row drops at the end (existing behavior preserved).
-- [ ] Cancelling the drag (releasing outside any drop zone) does not also fire a click — the chapter does not open spuriously after a cancelled drag.
-- [ ] The separate "Open" button on the manuscript row is removed; no UI regression on rows that are currently selected.
-- [ ] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+- [x] A pointer-down + pointer-up within 500 ms on a manuscript row opens that chapter (no need to aim for the "Open" button).
+- [x] A pointer-down held for ≥500 ms (or moved ≥ egui's drag threshold) on a manuscript row begins a drag, with the same drop targets and reorder behavior as today.
+- [x] Dragging onto another manuscript row drops before that row; dragging past the last row drops at the end (existing behavior preserved).
+- [x] Cancelling the drag (releasing outside any drop zone) does not also fire a click — the chapter does not open spuriously after a cancelled drag.
+- [x] The separate "Open" button on the manuscript row is removed; no UI regression on rows that are currently selected.
+- [x] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
 
 ## Design notes
 - 500 ms is the proposed default. Tunable to 400/600 ms if it feels off in practice; record the final value in a constant in `src/ui/file_tree.rs` with a one-line rationale.
