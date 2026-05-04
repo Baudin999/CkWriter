@@ -670,6 +670,7 @@ impl CkWriterApp {
 
 impl App for CkWriterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::theme::apply_text_styles(ctx, &self.settings);
         // Intercept window close: if any form is dirty, cancel the close and
         // stage a `CloseApp` pending nav so the shared discard modal handles
         // the choice. Discard then re-issues the close command.

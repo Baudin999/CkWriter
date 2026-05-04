@@ -1,5 +1,5 @@
-use crate::settings::ReadingFont;
-use egui::{Color32, FontData, FontDefinitions, FontFamily, Stroke, Visuals};
+use crate::settings::{ReadingFont, Settings};
+use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use std::sync::Arc;
 
 pub const BG_PRIMARY: Color32 = Color32::from_rgb(0x1e, 0x1e, 0x22);
@@ -90,6 +90,34 @@ pub fn install(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    ctx.set_style(style);
+}
+
+/// Install the app-wide font + size mapping into `egui::Style::text_styles`
+/// (#0020 pivot). Called every frame from `App::update` so settings changes
+/// live-apply. Body / Button → `font_size_normal`, Heading → `font_size_header`,
+/// Small → `font_size_info`, all in the chosen reading family. Monospace is
+/// left alone — code identifiers, LaTeX commands, and keyboard hints want
+/// monospace; the dyslexia fonts are proportional.
+pub fn apply_text_styles(ctx: &egui::Context, settings: &Settings) {
+    let family = reading_family(settings.reading_font);
+    let mut style = (*ctx.style()).clone();
+    style.text_styles.insert(
+        TextStyle::Body,
+        FontId::new(settings.font_size_normal, family.clone()),
+    );
+    style.text_styles.insert(
+        TextStyle::Button,
+        FontId::new(settings.font_size_normal, family.clone()),
+    );
+    style.text_styles.insert(
+        TextStyle::Heading,
+        FontId::new(settings.font_size_header, family.clone()),
+    );
+    style.text_styles.insert(
+        TextStyle::Small,
+        FontId::new(settings.font_size_info, family),
+    );
     ctx.set_style(style);
 }
 

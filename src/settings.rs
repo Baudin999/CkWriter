@@ -13,10 +13,9 @@ pub struct ChapterPlace {
     pub scroll: f32,
 }
 
-/// Reading-surface font choice (#0020). Drives both the editor and the chat
-/// panel — every reading surface in the app shares one selection. Atkinson is
-/// the dyslexia-friendly default; iA Writer Quattro is preserved as an option
-/// for direct comparison.
+/// App-wide font choice (#0020). Drives every proportional text surface
+/// (editor, chat, lists, forms, dialogs). Atkinson is the dyslexia-friendly
+/// default; iA Writer Quattro is preserved as an option for direct comparison.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReadingFont {
     #[default]
@@ -33,29 +32,48 @@ pub struct Settings {
     pub ollama_url: String,
     #[serde(default)]
     pub recent_books: Vec<PathBuf>,
-    /// Font for every reading surface (editor + chat). Default is Atkinson
-    /// Hyperlegible — the user is dyslexic and the dyslexia-friendly default
-    /// is the whole point of the reading-surface knobs (#0020).
+    /// App-wide font for every proportional text surface (#0020). The user is
+    /// dyslexic and the whole app is a reading surface — chrome, forms, and
+    /// dialogs all inherit this through `egui::Style::text_styles`.
     #[serde(default)]
     pub reading_font: ReadingFont,
-    /// Body font size in pixels for the editor and chat. Renamed from
-    /// `editor_font_size` (#0020) — chat is also a reading surface, so the
-    /// knob is shared. Old `settings.toml` files with `editor_font_size = N`
-    /// continue to load via the serde alias below.
+    /// Body / button font size in pixels (#0020 pivot). Renamed from
+    /// `reading_font_size` (which was renamed from `editor_font_size`); both
+    /// old keys keep loading via the aliases below.
     #[serde(
-        default = "default_reading_font_size",
+        default = "default_font_size_normal",
+        alias = "reading_font_size",
         alias = "editor_font_size"
     )]
-    pub reading_font_size: f32,
-    /// Multiplier applied to font size to derive line height. Replaces the
-    /// `LINE_HEIGHT_MULTIPLIER` const in `src/ui/editor.rs` (#0020).
-    #[serde(default = "default_reading_line_height_mult")]
-    pub reading_line_height_mult: f32,
-    /// Extra letter spacing in pixels passed into egui's `TextFormat`.
-    /// Replaces the hardcoded 0.1 literal in `build_job` (#0020). Default
-    /// 0.4 is a moderate bump on the previous 0.1.
-    #[serde(default = "default_reading_letter_spacing")]
-    pub reading_letter_spacing: f32,
+    pub font_size_normal: f32,
+    /// Heading font size in pixels (#0020 pivot). Maps to egui's
+    /// `TextStyle::Heading`.
+    #[serde(default = "default_font_size_header")]
+    pub font_size_header: f32,
+    /// Muted / `.small()` font size in pixels (#0020 pivot). Maps to egui's
+    /// `TextStyle::Small`.
+    #[serde(default = "default_font_size_info")]
+    pub font_size_info: f32,
+    /// Multiplier applied to `font_size_normal` to derive line height inside
+    /// the editor. Editor-only knob (#0020 pivot) — chat bubbles and chrome
+    /// use egui's default line spacing. Renamed from `reading_line_height_mult`.
+    #[serde(
+        default = "default_editor_line_height_mult",
+        alias = "reading_line_height_mult"
+    )]
+    pub editor_line_height_mult: f32,
+    /// Extra letter spacing in pixels for the editor's `TextFormat`. Editor-only
+    /// (#0020 pivot). Renamed from `reading_letter_spacing`.
+    #[serde(
+        default = "default_editor_letter_spacing",
+        alias = "reading_letter_spacing"
+    )]
+    pub editor_letter_spacing: f32,
+    /// Maximum prose column width in pixels for the editor (#0020 pivot).
+    /// Replaces the hardcoded `MAX_COLUMN_WIDTH` const. The responsive
+    /// `MIN_COLUMN_WIDTH` is still applied as a lower bound.
+    #[serde(default = "default_editor_column_width")]
+    pub editor_column_width: f32,
     #[serde(default = "default_left_panel_width")]
     pub left_panel_width: f32,
     #[serde(default = "default_right_panel_width")]
@@ -87,14 +105,23 @@ fn default_model() -> String {
 fn default_ollama_url() -> String {
     "http://localhost:11434".into()
 }
-fn default_reading_font_size() -> f32 {
+fn default_font_size_normal() -> f32 {
     18.0
 }
-fn default_reading_line_height_mult() -> f32 {
+fn default_font_size_header() -> f32 {
+    22.0
+}
+fn default_font_size_info() -> f32 {
+    13.0
+}
+fn default_editor_line_height_mult() -> f32 {
     1.7
 }
-fn default_reading_letter_spacing() -> f32 {
+fn default_editor_letter_spacing() -> f32 {
     0.4
+}
+fn default_editor_column_width() -> f32 {
+    760.0
 }
 fn default_left_panel_width() -> f32 {
     260.0
@@ -116,9 +143,12 @@ impl Default for Settings {
             ollama_url: default_ollama_url(),
             recent_books: Vec::new(),
             reading_font: ReadingFont::default(),
-            reading_font_size: default_reading_font_size(),
-            reading_line_height_mult: default_reading_line_height_mult(),
-            reading_letter_spacing: default_reading_letter_spacing(),
+            font_size_normal: default_font_size_normal(),
+            font_size_header: default_font_size_header(),
+            font_size_info: default_font_size_info(),
+            editor_line_height_mult: default_editor_line_height_mult(),
+            editor_letter_spacing: default_editor_letter_spacing(),
+            editor_column_width: default_editor_column_width(),
             left_panel_width: default_left_panel_width(),
             right_panel_width: default_right_panel_width(),
             last_book: None,

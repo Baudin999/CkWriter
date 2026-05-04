@@ -20,7 +20,10 @@ struct CachedLayoutJob {
     job: LayoutJob,
 }
 
-const MAX_COLUMN_WIDTH: f32 = 760.0;
+/// Lower bound for the editor's prose column. The upper bound now comes from
+/// `Settings::editor_column_width` (#0020 pivot); this responsive minimum
+/// kicks in only when the window itself is narrower than the user's chosen
+/// width.
 const MIN_COLUMN_WIDTH: f32 = 360.0;
 /// Bumped 24 → 56 across #0024 (play) and #0025 (trash) to fit two
 /// hover-only gutter glyphs between the page edge and the dirty bar.
@@ -85,9 +88,10 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         app.refresh_entity_hits();
     }
 
-    let font_size = app.settings.reading_font_size;
-    let line_height = (font_size * app.settings.reading_line_height_mult).round();
-    let letter_spacing = app.settings.reading_letter_spacing;
+    let font_size = app.settings.font_size_normal;
+    let line_height = (font_size * app.settings.editor_line_height_mult).round();
+    let letter_spacing = app.settings.editor_letter_spacing;
+    let max_column_width = app.settings.editor_column_width;
     let family = editor_family(app);
     let entity_hits = app.entity_hits.clone();
     let revisions: Vec<Revision> = app.revisions.clone();
@@ -206,8 +210,8 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     }
     let scroll_out = scroll.show(ui, |ui| {
         let avail = ui.available_size();
-        let pad_x = (((avail.x - MAX_COLUMN_WIDTH) * 0.5).max(MIN_SIDE_PADDING)).floor();
-        let column_w = (avail.x - 2.0 * pad_x).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        let pad_x = (((avail.x - max_column_width) * 0.5).max(MIN_SIDE_PADDING)).floor();
+        let column_w = (avail.x - 2.0 * pad_x).clamp(MIN_COLUMN_WIDTH, max_column_width);
         let rows = ((avail.y / line_height).floor() as usize).max(8);
 
         ui.add_space(TOP_PADDING);

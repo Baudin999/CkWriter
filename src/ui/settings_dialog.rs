@@ -69,7 +69,7 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
 
             ui.add_space(12.0);
             ui.label(
-                RichText::new("Reading")
+                RichText::new("Reading (app-wide)")
                     .small()
                     .strong()
                     .color(theme::TEXT_MUTED),
@@ -103,10 +103,67 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                 });
 
             ui.add_space(6.0);
-            ui.label(RichText::new("font size").small().color(theme::TEXT_MUTED));
+            ui.label(
+                RichText::new("font size — body")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
             let resp = ui.add(
-                egui::Slider::new(&mut app.settings.reading_font_size, 12.0..=28.0)
+                egui::Slider::new(&mut app.settings.font_size_normal, 12.0..=28.0)
                     .step_by(1.0)
+                    .suffix(" px"),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("font size — heading")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let resp = ui.add(
+                egui::Slider::new(&mut app.settings.font_size_header, 14.0..=34.0)
+                    .step_by(1.0)
+                    .suffix(" px"),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("font size — info")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let resp = ui.add(
+                egui::Slider::new(&mut app.settings.font_size_info, 10.0..=18.0)
+                    .step_by(1.0)
+                    .suffix(" px"),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new("Editor")
+                    .small()
+                    .strong()
+                    .color(theme::TEXT_MUTED),
+            );
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("column width")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let resp = ui.add(
+                egui::Slider::new(&mut app.settings.editor_column_width, 480.0..=1000.0)
+                    .step_by(10.0)
                     .suffix(" px"),
             );
             if resp.changed() {
@@ -120,7 +177,7 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                     .color(theme::TEXT_MUTED),
             );
             let resp = ui.add(
-                egui::Slider::new(&mut app.settings.reading_line_height_mult, 1.2..=2.2)
+                egui::Slider::new(&mut app.settings.editor_line_height_mult, 1.2..=2.2)
                     .step_by(0.1)
                     .suffix("×"),
             );
@@ -135,7 +192,7 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                     .color(theme::TEXT_MUTED),
             );
             let resp = ui.add(
-                egui::Slider::new(&mut app.settings.reading_letter_spacing, 0.0..=1.5)
+                egui::Slider::new(&mut app.settings.editor_letter_spacing, 0.0..=1.5)
                     .step_by(0.1)
                     .suffix(" px"),
             );
