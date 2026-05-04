@@ -1,4 +1,5 @@
 use crate::app::CkWriterApp;
+use crate::settings::ReadingFont;
 use crate::theme;
 use egui::RichText;
 
@@ -66,15 +67,76 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                 changed = true;
             }
 
-            ui.add_space(8.0);
+            ui.add_space(12.0);
             ui.label(
-                RichText::new("editor font size")
+                RichText::new("Reading")
+                    .small()
+                    .strong()
+                    .color(theme::TEXT_MUTED),
+            );
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("font").small().color(theme::TEXT_MUTED));
+            let current_font_label = match app.settings.reading_font {
+                ReadingFont::AtkinsonHyperlegible => "Atkinson Hyperlegible",
+                ReadingFont::OpenDyslexic => "OpenDyslexic",
+                ReadingFont::IaWriterQuattro => "iA Writer Quattro",
+            };
+            egui::ComboBox::from_id_salt("settings_reading_font")
+                .selected_text(current_font_label)
+                .width(400.0)
+                .show_ui(ui, |ui| {
+                    for (variant, label) in [
+                        (
+                            ReadingFont::AtkinsonHyperlegible,
+                            "Atkinson Hyperlegible",
+                        ),
+                        (ReadingFont::OpenDyslexic, "OpenDyslexic"),
+                        (ReadingFont::IaWriterQuattro, "iA Writer Quattro"),
+                    ] {
+                        let selected = app.settings.reading_font == variant;
+                        if ui.selectable_label(selected, label).clicked() && !selected {
+                            app.settings.reading_font = variant;
+                            changed = true;
+                        }
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("font size").small().color(theme::TEXT_MUTED));
+            let resp = ui.add(
+                egui::Slider::new(&mut app.settings.reading_font_size, 12.0..=28.0)
+                    .step_by(1.0)
+                    .suffix(" px"),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("line height")
                     .small()
                     .color(theme::TEXT_MUTED),
             );
             let resp = ui.add(
-                egui::Slider::new(&mut app.settings.editor_font_size, 10.0..=28.0)
-                    .step_by(1.0)
+                egui::Slider::new(&mut app.settings.reading_line_height_mult, 1.2..=2.2)
+                    .step_by(0.1)
+                    .suffix("×"),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("letter spacing")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let resp = ui.add(
+                egui::Slider::new(&mut app.settings.reading_letter_spacing, 0.0..=1.5)
+                    .step_by(0.1)
                     .suffix(" px"),
             );
             if resp.changed() {

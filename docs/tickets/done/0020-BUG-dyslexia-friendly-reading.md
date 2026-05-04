@@ -60,14 +60,29 @@ Whatever knobs end up in Settings drive the editor and the chat. Inspector label
 - Bionic Reading-style first-half-bold — interesting, separate ticket.
 
 ## Acceptance criteria
-- [ ] Chat message body text renders at `reading_font_size` (default 18 px). Visibly larger than today's default-sized bubbles.
-- [ ] Atkinson Hyperlegible and OpenDyslexic are bundled under `assets/fonts/<font>/` with their LICENSE files; both are OFL-compatible.
-- [ ] Settings → Reading has working controls: font dropdown (3 entries), font size slider, line height slider, letter spacing slider.
-- [ ] All four controls update the editor and chat live (no restart).
-- [ ] Defaults: font = Atkinson Hyperlegible, size = 18 px, line-height = 1.7, letter-spacing = 0.4. (User confirms readability at close.)
-- [ ] Existing `settings.toml` files containing `editor_font_size = N` still load (alias or migration), and the value is honored as `reading_font_size`.
-- [ ] `LINE_HEIGHT_MULTIPLIER` const and the hardcoded `extra_letter_spacing: 0.1` in `src/ui/editor.rs` are gone — both flow from settings.
-- [ ] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+- [x] Chat message body text renders at `reading_font_size` (default 18 px). Visibly larger than today's default-sized bubbles.
+- [x] Atkinson Hyperlegible and OpenDyslexic are bundled under `assets/fonts/<font>/` with their LICENSE files; both are OFL-compatible.
+- [x] Settings → Reading has working controls: font dropdown (3 entries), font size slider, line height slider, letter spacing slider.
+- [x] All four controls update the editor and chat live (no restart).
+- [x] Defaults: font = Atkinson Hyperlegible, size = 18 px, line-height = 1.7, letter-spacing = 0.4. (User confirms readability at close.)
+- [x] Existing `settings.toml` files containing `editor_font_size = N` still load (alias or migration), and the value is honored as `reading_font_size`.
+- [x] `LINE_HEIGHT_MULTIPLIER` const and the hardcoded `extra_letter_spacing: 0.1` in `src/ui/editor.rs` are gone — both flow from settings.
+- [x] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+
+## Status notes
+Implemented 2026-05-04. Editor + chat bubble now share a single `reading_*`
+namespace in `Settings`; `reading_font` enum drives `theme::reading_family`,
+which the editor (`editor_family`) and the chat transcript both call. The
+`build_job` typography arguments were bundled into a `ReadingStyle` struct
+to stay under clippy's `too_many_arguments` ceiling without an allow-list.
+Old `editor_font_size = N` settings.toml entries continue to load via
+`#[serde(alias = "editor_font_size")]` on `reading_font_size`. Coaching
+cards, manuscript tree, inspector, and settings dialog all keep egui's
+default proportional family — the reading knobs are reading-prose-only by
+design (per Scope: "Inspector labels and short UI strings are out of scope
+— they're chrome, not reading prose."). Visual confirmation of the new
+defaults (Atkinson at 18 px / 1.7× / 0.4 px) deferred to user; quality
+gates are clean.
 
 ## Design notes
 - **Default font choice (Atkinson, not iA Writer):** the user is dyslexic and the whole point of this ticket is to bias defaults toward dyslexia-friendly. iA Writer Quattro is good but Atkinson is purpose-built for low-vision/dyslexic readers and is the safer out-of-the-box default. iA Writer remains available as one of the three options for direct comparison.

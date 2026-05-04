@@ -1426,11 +1426,23 @@ fn show_chat(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 );
                 return;
             }
+            // Bubble body inherits the editor's reading font + size (#0020):
+            // chat is a reading surface and the user is dyslexic, so a
+            // 13 px default proportional bubble is too small for sustained
+            // assistant replies.
+            let reading_font = theme::reading_family(app.settings.reading_font);
+            let reading_size = app.settings.reading_font_size;
             for msg in &app.chat_messages {
-                chat_bubble(ui, &msg.role, &msg.content);
+                chat_bubble(ui, &msg.role, &msg.content, &reading_font, reading_size);
             }
             if !app.chat_pending_assistant.is_empty() {
-                chat_bubble(ui, "assistant", &app.chat_pending_assistant);
+                chat_bubble(
+                    ui,
+                    "assistant",
+                    &app.chat_pending_assistant,
+                    &reading_font,
+                    reading_size,
+                );
             }
         });
 
@@ -1467,7 +1479,13 @@ fn show_chat(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     }
 }
 
-fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
+fn chat_bubble(
+    ui: &mut egui::Ui,
+    role: &str,
+    content: &str,
+    body_family: &egui::FontFamily,
+    body_size: f32,
+) {
     let (label, fg) = match role {
         "user" => ("you", theme::ACCENT),
         "assistant" => ("ai", theme::REVISION_VOICE),
@@ -1479,7 +1497,11 @@ fn chat_bubble(ui: &mut egui::Ui, role: &str, content: &str) {
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(RichText::new(label).small().color(fg).strong());
-            ui.label(RichText::new(content).color(theme::TEXT_PRIMARY));
+            ui.label(
+                RichText::new(content)
+                    .color(theme::TEXT_PRIMARY)
+                    .font(egui::FontId::new(body_size, body_family.clone())),
+            );
         });
     ui.add_space(4.0);
 }

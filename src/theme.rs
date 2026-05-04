@@ -1,3 +1,4 @@
+use crate::settings::ReadingFont;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Stroke, Visuals};
 use std::sync::Arc;
 
@@ -50,8 +51,25 @@ pub const DIFF_INSERTED: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const DIFF_CHANGED: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
 
 pub const WRITER_FAMILY: &str = "writer";
+/// Reading family chains keyed by [`ReadingFont`] (#0020). Each chain has the
+/// dyslexia/legibility primary first, then iA Writer Quattro as a fallback,
+/// then Ubuntu-Light, then fontawesome — same pattern as `WRITER_FAMILY` so
+/// any reading family resolves icon glyphs.
+pub const READING_FAMILY_ATKINSON: &str = "reading-atkinson";
+pub const READING_FAMILY_OPENDYSLEXIC: &str = "reading-opendyslexic";
 
 const IA_WRITER_DIR: &str = "/usr/share/fonts/ttf-ia-writer";
+
+/// Resolve a [`ReadingFont`] selection to the egui [`FontFamily`] registered
+/// in [`install_fonts`]. The editor and chat both call this so they stay in
+/// lockstep with the user's setting.
+pub fn reading_family(font: ReadingFont) -> FontFamily {
+    match font {
+        ReadingFont::AtkinsonHyperlegible => FontFamily::Name(READING_FAMILY_ATKINSON.into()),
+        ReadingFont::OpenDyslexic => FontFamily::Name(READING_FAMILY_OPENDYSLEXIC.into()),
+        ReadingFont::IaWriterQuattro => FontFamily::Name(WRITER_FAMILY.into()),
+    }
+}
 
 pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
@@ -77,23 +95,39 @@ pub fn install(ctx: &egui::Context) {
 
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let mut writer_chain: Vec<String> = Vec::new();
 
-    if let Some(bytes) = read_font(&format!("{IA_WRITER_DIR}/iAWriterQuattroS-Regular.ttf")) {
+    // iA Writer Quattro S is loaded from the system package; if it isn't
+    // installed the writer family falls through to Ubuntu-Light. The bundled
+    // reading fonts (Atkinson, OpenDyslexic) ship in-tree so they're always
+    // available regardless of system state.
+    let ia_writer_present = if let Some(bytes) =
+        read_font(&format!("{IA_WRITER_DIR}/iAWriterQuattroS-Regular.ttf"))
+    {
         fonts.font_data.insert(
             "ia-writer-quattro".to_owned(),
             Arc::new(FontData::from_owned(bytes)),
         );
-        writer_chain.push("ia-writer-quattro".to_owned());
+        true
     } else {
         log::warn!(
             "iA Writer Quattro S not found at {IA_WRITER_DIR}; falling back to default proportional font"
         );
-    }
+        false
+    };
 
-    // Always fall back through the built-in proportional font so the family
-    // resolves even if iA Writer isn't installed on this machine.
-    writer_chain.push("Ubuntu-Light".to_owned());
+    let atkinson_bytes = include_bytes!(
+        "../assets/fonts/atkinson-hyperlegible/AtkinsonHyperlegible-Regular.ttf"
+    );
+    fonts.font_data.insert(
+        "atkinson-hyperlegible".to_owned(),
+        Arc::new(FontData::from_static(atkinson_bytes)),
+    );
+    let opendyslexic_bytes =
+        include_bytes!("../assets/fonts/opendyslexic/OpenDyslexic-Regular.otf");
+    fonts.font_data.insert(
+        "opendyslexic".to_owned(),
+        Arc::new(FontData::from_static(opendyslexic_bytes)),
+    );
 
     // Bundle Font Awesome 4 so icon glyphs (PUA, U+F000–U+F2FF) render
     // anywhere we drop them into a string. Loaded as a fallback on every
@@ -111,11 +145,41 @@ fn install_fonts(ctx: &egui::Context) {
             .or_default()
             .push("fontawesome".to_owned());
     }
+
+    // Shared tail every reading family appends after its primary: iA Writer
+    // (when present) → Ubuntu-Light → fontawesome. Keeps icon glyphs and
+    // missing-codepoint coverage uniform across the three reading fonts.
+    let mut reading_tail: Vec<String> = Vec::new();
+    if ia_writer_present {
+        reading_tail.push("ia-writer-quattro".to_owned());
+    }
+    reading_tail.push("Ubuntu-Light".to_owned());
+    reading_tail.push("fontawesome".to_owned());
+
+    let mut writer_chain: Vec<String> = Vec::new();
+    if ia_writer_present {
+        writer_chain.push("ia-writer-quattro".to_owned());
+    }
+    writer_chain.push("Ubuntu-Light".to_owned());
     writer_chain.push("fontawesome".to_owned());
+
+    let mut atkinson_chain: Vec<String> = vec!["atkinson-hyperlegible".to_owned()];
+    atkinson_chain.extend(reading_tail.iter().cloned());
+
+    let mut opendyslexic_chain: Vec<String> = vec!["opendyslexic".to_owned()];
+    opendyslexic_chain.extend(reading_tail.iter().cloned());
 
     fonts
         .families
         .insert(FontFamily::Name(WRITER_FAMILY.into()), writer_chain);
+    fonts.families.insert(
+        FontFamily::Name(READING_FAMILY_ATKINSON.into()),
+        atkinson_chain,
+    );
+    fonts.families.insert(
+        FontFamily::Name(READING_FAMILY_OPENDYSLEXIC.into()),
+        opendyslexic_chain,
+    );
 
     ctx.set_fonts(fonts);
 }

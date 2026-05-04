@@ -28,7 +28,6 @@ const MIN_COLUMN_WIDTH: f32 = 360.0;
 const MIN_SIDE_PADDING: f32 = 56.0;
 const TOP_PADDING: f32 = 32.0;
 const BOTTOM_PADDING: f32 = 96.0;
-const LINE_HEIGHT_MULTIPLIER: f32 = 1.7;
 
 /// Width of the per-paragraph dirty gutter painted to the left of the editor
 /// column (#0023). Sits inside the column's left padding, with `GUTTER_GAP_PX`
@@ -47,8 +46,8 @@ const ICON_GAP_PX: f32 = 6.0;
 /// `Pipeline::label`.
 const GUTTER_PIPELINE_LABELS: &[&str] = &["show, don't tell", "prose", "spelling"];
 
-fn editor_family() -> FontFamily {
-    FontFamily::Name(theme::WRITER_FAMILY.into())
+fn editor_family(app: &CkWriterApp) -> FontFamily {
+    theme::reading_family(app.settings.reading_font)
 }
 
 pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
@@ -86,9 +85,10 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
         app.refresh_entity_hits();
     }
 
-    let font_size = app.settings.editor_font_size;
-    let line_height = (font_size * LINE_HEIGHT_MULTIPLIER).round();
-    let family = editor_family();
+    let font_size = app.settings.reading_font_size;
+    let line_height = (font_size * app.settings.reading_line_height_mult).round();
+    let letter_spacing = app.settings.reading_letter_spacing;
+    let family = editor_family(app);
     let entity_hits = app.entity_hits.clone();
     let revisions: Vec<Revision> = app.revisions.clone();
     let selected_revision = app.selected_revision;
@@ -105,6 +105,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
             selected_revision,
             font_size,
             line_height,
+            letter_spacing,
             family_label: &family_label,
             wrap_width,
         });
@@ -124,11 +125,15 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 entity_hits.len(),
                 revisions.len(),
             );
-            let mut j = build_job(
-                text,
+            let style = ReadingStyle {
                 font_size,
                 line_height,
-                &layout_family,
+                letter_spacing,
+                family: &layout_family,
+            };
+            let mut j = build_job(
+                text,
+                &style,
                 &entity_hits,
                 &revisions,
                 selected_revision,
@@ -699,21 +704,29 @@ fn is_latex_word_boundary(bytes: &[u8], pos: usize) -> bool {
     !bytes[pos].is_ascii_alphanumeric()
 }
 
-fn build_job(
-    text: &str,
+/// Typography for one editor layout pass. Bundles the four reading knobs
+/// (#0020) plus the font family so `build_job` can stay under clippy's
+/// `too_many_arguments` threshold.
+struct ReadingStyle<'a> {
     font_size: f32,
     line_height: f32,
-    family: &FontFamily,
+    letter_spacing: f32,
+    family: &'a FontFamily,
+}
+
+fn build_job(
+    text: &str,
+    style: &ReadingStyle<'_>,
     hits: &[EntityHit],
     revisions: &[Revision],
     selected_revision: Option<u32>,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     let base = TextFormat {
-        font_id: FontId::new(font_size, family.clone()),
+        font_id: FontId::new(style.font_size, style.family.clone()),
         color: theme::TEXT_PRIMARY,
-        line_height: Some(line_height),
-        extra_letter_spacing: 0.1,
+        line_height: Some(style.line_height),
+        extra_letter_spacing: style.letter_spacing,
         ..Default::default()
     };
 
@@ -1031,6 +1044,7 @@ struct LayoutInputs<'a> {
     selected_revision: Option<u32>,
     font_size: f32,
     line_height: f32,
+    letter_spacing: f32,
     family_label: &'a str,
     wrap_width: f32,
 }
@@ -1090,6 +1104,7 @@ fn layout_fingerprint(inp: &LayoutInputs<'_>) -> u64 {
     h.update(b"fmt\0");
     h.update(&inp.font_size.to_bits().to_le_bytes());
     h.update(&inp.line_height.to_bits().to_le_bytes());
+    h.update(&inp.letter_spacing.to_bits().to_le_bytes());
     h.update(&(inp.family_label.len() as u32).to_le_bytes());
     h.update(inp.family_label.as_bytes());
     h.update(&inp.wrap_width.to_bits().to_le_bytes());
@@ -1136,6 +1151,7 @@ mod tests {
         selected_revision: Option<u32>,
         font_size: f32,
         line_height: f32,
+        letter_spacing: f32,
         family_label: String,
         wrap_width: f32,
     }
@@ -1149,6 +1165,7 @@ mod tests {
                 selected_revision: Some(7),
                 font_size: 18.0,
                 line_height: 30.0,
+                letter_spacing: 0.4,
                 family_label: "writer".to_string(),
                 wrap_width: 720.0,
             }
@@ -1162,6 +1179,7 @@ mod tests {
                 selected_revision: self.selected_revision,
                 font_size: self.font_size,
                 line_height: self.line_height,
+                letter_spacing: self.letter_spacing,
                 family_label: &self.family_label,
                 wrap_width: self.wrap_width,
             }
@@ -1280,6 +1298,7 @@ mod tests {
             selected_revision: None,
             font_size: 16.0,
             line_height: 24.0,
+            letter_spacing: 0.4,
             family_label: "",
             wrap_width: 600.0,
         };
@@ -1588,15 +1607,13 @@ mod tests {
         revisions: &[Revision],
         selected: Option<u32>,
     ) -> LayoutJob {
-        build_job(
-            text,
-            18.0,
-            30.0,
-            &FontFamily::Proportional,
-            hits,
-            revisions,
-            selected,
-        )
+        let style = ReadingStyle {
+            font_size: 18.0,
+            line_height: 30.0,
+            letter_spacing: 0.4,
+            family: &FontFamily::Proportional,
+        };
+        build_job(text, &style, hits, revisions, selected)
     }
 
     #[test]
