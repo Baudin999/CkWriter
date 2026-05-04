@@ -26,13 +26,13 @@ The writer is using these constantly while drafting and cannot tell at a glance 
 - Highlighting these in the chat panel or PDF preview.
 
 ## Acceptance criteria
-- [ ] Typing `\nl` in the editor renders the four characters in pink immediately (no save/reopen needed).
-- [ ] Typing `\switch` renders all seven characters in pink.
-- [ ] Typing `\emph{hello}` renders `\emph{` and `}` in pink and `hello` in italic default-color text.
-- [ ] A nearly-correct typo like `\n1` or `\Switch` does **not** highlight (acts as the canary for "did I type it right").
-- [ ] LaTeX command highlighting layers correctly with entity hits (e.g. `\emph{Skari}` colors `\emph{` and `}` pink and shows `Skari` as an entity-colored italic span).
-- [ ] LaTeX command highlighting does not block revision underlines (revisions still render on top).
-- [ ] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+- [x] Typing `\nl` in the editor renders the four characters in pink immediately (no save/reopen needed).
+- [x] Typing `\switch` renders all seven characters in pink.
+- [x] Typing `\emph{hello}` renders `\emph{` and `}` in pink and `hello` in italic default-color text.
+- [x] A nearly-correct typo like `\n1` or `\Switch` does **not** highlight (acts as the canary for "did I type it right").
+- [x] LaTeX command highlighting layers correctly with entity hits (e.g. `\emph{Skari}` colors `\emph{` and `}` pink and shows `Skari` as an entity-colored italic span).
+- [x] LaTeX command highlighting does not block revision underlines (revisions still render on top).
+- [x] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
 
 ## Design notes
 - Tokenizer can be a simple linear scan over `text` looking for `\nl\b`, `\switch\b`, and `\emph\{`. No regex dependency needed.

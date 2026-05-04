@@ -11,6 +11,11 @@ pub const ACCENT: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
 pub const ERROR: Color32 = Color32::from_rgb(0xf7, 0x6a, 0x6a);
 pub const ENTITY_CHARACTER: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const ENTITY_LOCATION: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
+/// Pink for the project's three custom LaTeX command tokens (`\nl`,
+/// `\switch`, `\emph{` / `}`) so the writer can see at a glance whether the
+/// slash actually landed. Sits in the warm-pink corner of the palette so it
+/// reads as "command", distinct from entity hits and revision underlines.
+pub const LATEX_COMMAND: Color32 = Color32::from_rgb(0xf7, 0x6a, 0xc8);
 pub const REVISION_VOICE: Color32 = Color32::from_rgb(0xf7, 0xc8, 0x6a);
 pub const REVISION_SHOW: Color32 = Color32::from_rgb(0x7a, 0xc8, 0xf7);
 pub const REVISION_PROSE: Color32 = Color32::from_rgb(0xc8, 0x7a, 0xf7);

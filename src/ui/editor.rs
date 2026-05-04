@@ -560,11 +560,15 @@ pub fn revision_color(rev: &Revision) -> Color32 {
 /// Source of a span's visual contribution. Entities and revisions paint the
 /// same `TextFormat` slots (color, underline, background) but with different
 /// rules: revisions stack and use the foreground for the underline, entities
-/// recolor the glyph and underline themselves at low intensity.
+/// recolor the glyph and underline themselves at low intensity. LaTeX command
+/// tokens (#0015) recolor the glyph but draw no underline; revisions and
+/// entities outrank them so a coach flag or character hit on top of `\nl`
+/// keeps its usual look.
 #[derive(Clone, Copy)]
 enum LayerKind {
     Entity,
     Revision,
+    LatexCommand,
 }
 
 #[derive(Clone, Copy)]
@@ -594,6 +598,105 @@ const OVERLAP_TINT_ALPHA: u8 = 0x28;
 /// stays correct if the editor surface ever changes color (egui blends).
 fn revision_tint(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+/// Tokenize the project's three custom LaTeX commands (`\nl`, `\switch`,
+/// `\emph{...}`) into pink command spans plus italic byte ranges for
+/// `\emph` content (#0015). Linear single-pass scan; no regex.
+///
+/// Word boundary for `\nl` and `\switch`: end-of-text or next byte not in
+/// `[A-Za-z0-9]`. Multi-byte UTF-8 starter bytes (≥0x80) are not ASCII
+/// alphanumeric, so a `\nl` followed by `é` still matches. `\emph{` requires
+/// a same-paragraph closing `}` (no nesting); a missing brace before `\n` or
+/// end-of-text leaves the span un-applied — better dim than fake-emphasized.
+fn latex_layers(text: &str) -> (Vec<Layer>, Vec<(usize, usize)>) {
+    let mut layers: Vec<Layer> = Vec::new();
+    let mut italics: Vec<(usize, usize)> = Vec::new();
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        if i + 3 <= n
+            && &bytes[i..i + 3] == b"\\nl"
+            && is_latex_word_boundary(bytes, i + 3)
+        {
+            layers.push(Layer {
+                start: i,
+                end: i + 3,
+                color: theme::LATEX_COMMAND,
+                kind: LayerKind::LatexCommand,
+                priority: 0,
+                selected: false,
+            });
+            i += 3;
+            continue;
+        }
+        if i + 7 <= n
+            && &bytes[i..i + 7] == b"\\switch"
+            && is_latex_word_boundary(bytes, i + 7)
+        {
+            layers.push(Layer {
+                start: i,
+                end: i + 7,
+                color: theme::LATEX_COMMAND,
+                kind: LayerKind::LatexCommand,
+                priority: 0,
+                selected: false,
+            });
+            i += 7;
+            continue;
+        }
+        if i + 6 <= n && &bytes[i..i + 6] == b"\\emph{" {
+            let mut j = i + 6;
+            let mut close: Option<usize> = None;
+            while j < n {
+                match bytes[j] {
+                    b'\n' => break,
+                    b'}' => {
+                        close = Some(j);
+                        break;
+                    }
+                    _ => j += 1,
+                }
+            }
+            if let Some(close) = close {
+                layers.push(Layer {
+                    start: i,
+                    end: i + 6,
+                    color: theme::LATEX_COMMAND,
+                    kind: LayerKind::LatexCommand,
+                    priority: 0,
+                    selected: false,
+                });
+                layers.push(Layer {
+                    start: close,
+                    end: close + 1,
+                    color: theme::LATEX_COMMAND,
+                    kind: LayerKind::LatexCommand,
+                    priority: 0,
+                    selected: false,
+                });
+                if i + 6 < close {
+                    italics.push((i + 6, close));
+                }
+                i = close + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    (layers, italics)
+}
+
+fn is_latex_word_boundary(bytes: &[u8], pos: usize) -> bool {
+    if pos >= bytes.len() {
+        return true;
+    }
+    !bytes[pos].is_ascii_alphanumeric()
 }
 
 fn build_job(
@@ -637,7 +740,9 @@ fn build_job(
             end: h.end,
             color,
             kind: LayerKind::Entity,
-            priority: 0,
+            // Entity > LatexCommand (50 vs 0) so an entity hit inside an
+            // `\emph{...}` paints in the entity color, not pink (#0015).
+            priority: 50,
             selected: false,
         });
     }
@@ -666,6 +771,9 @@ fn build_job(
         });
     }
 
+    let (latex_cmd_layers, italic_ranges) = latex_layers(text);
+    layers.extend(latex_cmd_layers);
+
     if layers.is_empty() {
         if !text.is_empty() {
             job.append(text, 0.0, base);
@@ -678,70 +786,93 @@ fn build_job(
     // constant set of layers. This is what lets two overlapping revisions
     // both contribute formatting — the previous algorithm dropped any span
     // starting before the running cursor and the second revision vanished.
-    let mut boundaries: Vec<usize> =
-        layers.iter().flat_map(|l| [l.start, l.end]).collect();
+    // Italic ranges contribute boundaries too so italic is constant per
+    // sub-range and composes additively with any layer that wins the slot.
+    let mut boundaries: Vec<usize> = layers
+        .iter()
+        .flat_map(|l| [l.start, l.end])
+        .chain(italic_ranges.iter().flat_map(|(s, e)| [*s, *e]))
+        .collect();
     boundaries.sort_unstable();
     boundaries.dedup();
+
+    let italic_covers = |s: usize, e: usize| {
+        italic_ranges
+            .iter()
+            .any(|(is, ie)| *is <= s && *ie >= e)
+    };
 
     let mut cursor = 0usize;
     for window in boundaries.windows(2) {
         let s = window[0];
         let e = window[1];
         if cursor < s {
-            job.append(&text[cursor..s], 0.0, base.clone());
+            let mut gap = base.clone();
+            if italic_covers(cursor, s) {
+                gap.italics = true;
+            }
+            job.append(&text[cursor..s], 0.0, gap);
         }
         let participants: Vec<&Layer> = layers
             .iter()
             .filter(|l| l.start <= s && l.end >= e)
             .collect();
-        if participants.is_empty() {
-            job.append(&text[s..e], 0.0, base.clone());
-            cursor = e;
-            continue;
-        }
-        let primary = participants
-            .iter()
-            .copied()
-            .max_by_key(|l| l.priority)
-            .expect("non-empty");
-        let revision_layers: Vec<&Layer> = participants
-            .iter()
-            .copied()
-            .filter(|l| matches!(l.kind, LayerKind::Revision))
-            .collect();
-        let selected_layer = revision_layers.iter().copied().find(|l| l.selected);
-
         let mut fmt = base.clone();
-        match primary.kind {
-            LayerKind::Entity => {
-                fmt.color = primary.color;
-                fmt.underline = Stroke::new(1.0, primary.color.linear_multiply(0.6));
+        if !participants.is_empty() {
+            let primary = participants
+                .iter()
+                .copied()
+                .max_by_key(|l| l.priority)
+                .expect("non-empty");
+            let revision_layers: Vec<&Layer> = participants
+                .iter()
+                .copied()
+                .filter(|l| matches!(l.kind, LayerKind::Revision))
+                .collect();
+            let selected_layer = revision_layers.iter().copied().find(|l| l.selected);
+
+            match primary.kind {
+                LayerKind::Entity => {
+                    fmt.color = primary.color;
+                    fmt.underline = Stroke::new(1.0, primary.color.linear_multiply(0.6));
+                }
+                LayerKind::Revision => {
+                    let width = if primary.selected { 3.0 } else { 2.0 };
+                    fmt.underline = Stroke::new(width, primary.color);
+                }
+                LayerKind::LatexCommand => {
+                    fmt.color = primary.color;
+                }
             }
-            LayerKind::Revision => {
-                let width = if primary.selected { 3.0 } else { 2.0 };
-                fmt.underline = Stroke::new(width, primary.color);
+
+            if let Some(sel) = selected_layer {
+                // Selected anywhere in this sub-range: paint a chip-matching
+                // tint so the writer can locate the click target at a glance.
+                fmt.background = revision_tint(sel.color, SELECTED_TINT_ALPHA);
+            } else if revision_layers.len() >= 2 {
+                // Two or more unselected revisions stack here: the primary
+                // underlines the region; the secondary's color shows through
+                // as a subtle background tint so a click on the dropped card
+                // can't read as a no-op.
+                let mut sorted = revision_layers.clone();
+                sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
+                fmt.background = revision_tint(sorted[1].color, OVERLAP_TINT_ALPHA);
             }
         }
 
-        if let Some(sel) = selected_layer {
-            // Selected anywhere in this sub-range: paint a chip-matching
-            // tint so the writer can locate the click target at a glance.
-            fmt.background = revision_tint(sel.color, SELECTED_TINT_ALPHA);
-        } else if revision_layers.len() >= 2 {
-            // Two or more unselected revisions stack here: the primary
-            // underlines the region; the secondary's color shows through
-            // as a subtle background tint so a click on the dropped card
-            // can't read as a no-op.
-            let mut sorted = revision_layers.clone();
-            sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
-            fmt.background = revision_tint(sorted[1].color, OVERLAP_TINT_ALPHA);
+        if italic_covers(s, e) {
+            fmt.italics = true;
         }
 
         job.append(&text[s..e], 0.0, fmt);
         cursor = e;
     }
     if cursor < text_len {
-        job.append(&text[cursor..], 0.0, base);
+        let mut tail = base.clone();
+        if italic_covers(cursor, text_len) {
+            tail.italics = true;
+        }
+        job.append(&text[cursor..], 0.0, tail);
     }
     job
 }
@@ -1448,12 +1579,21 @@ mod tests {
     }
 
     fn run_build_job(text: &str, revisions: &[Revision], selected: Option<u32>) -> LayoutJob {
+        run_build_job_with_hits(text, &[], revisions, selected)
+    }
+
+    fn run_build_job_with_hits(
+        text: &str,
+        hits: &[EntityHit],
+        revisions: &[Revision],
+        selected: Option<u32>,
+    ) -> LayoutJob {
         build_job(
             text,
             18.0,
             30.0,
             &FontFamily::Proportional,
-            &[],
+            hits,
             revisions,
             selected,
         )
@@ -1548,6 +1688,137 @@ mod tests {
             "selected underline must be 3px, got {}",
             section.format.underline.width
         );
+        assert_eq!(section.format.underline.color, theme::REVISION_PROSE);
+    }
+
+    // --- LaTeX command highlighting (#0015) -------------------------------
+
+    fn section_for(job: &LayoutJob, range: (usize, usize)) -> &egui::text::LayoutSection {
+        job.sections
+            .iter()
+            .find(|s| s.byte_range.start == range.0 && s.byte_range.end == range.1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no section for byte range {:?}: {:#?}",
+                    range, job.sections
+                )
+            })
+    }
+
+    #[test]
+    fn nl_command_renders_in_pink() {
+        // Canary for "did the slash actually land": `\nl` must color all four
+        // characters so a typo (`\n1`) reads as plain prose by contrast.
+        let text = "first line\\nl second line";
+        let job = run_build_job(text, &[], None);
+        let section = section_for(&job, (10, 13));
+        assert_eq!(section.format.color, theme::LATEX_COMMAND);
+    }
+
+    #[test]
+    fn switch_command_renders_in_pink() {
+        let text = "scene one\\switch scene two";
+        let job = run_build_job(text, &[], None);
+        let section = section_for(&job, (9, 16));
+        assert_eq!(section.format.color, theme::LATEX_COMMAND);
+    }
+
+    #[test]
+    fn emph_braces_pink_and_content_italic() {
+        // `\emph{` and `}` get the command color; the content between renders
+        // italic in default text color so the editor mirrors the PDF.
+        let text = "say \\emph{hello} now";
+        let job = run_build_job(text, &[], None);
+
+        let open = section_for(&job, (4, 10)); // `\emph{`
+        assert_eq!(open.format.color, theme::LATEX_COMMAND);
+        assert!(!open.format.italics);
+
+        let body = section_for(&job, (10, 15)); // `hello`
+        assert_eq!(body.format.color, theme::TEXT_PRIMARY);
+        assert!(body.format.italics);
+
+        let close = section_for(&job, (15, 16)); // `}`
+        assert_eq!(close.format.color, theme::LATEX_COMMAND);
+        assert!(!close.format.italics);
+    }
+
+    #[test]
+    fn near_miss_typos_do_not_highlight() {
+        // `\n1` (digit) and `\Switch` (capital) are the canary cases the
+        // ticket calls out — both must stay default-colored so the writer
+        // can spot them by contrast against a real `\nl` / `\switch`.
+        let text = "ok \\n1 and \\Switch end";
+        let job = run_build_job(text, &[], None);
+        for section in &job.sections {
+            assert_ne!(
+                section.format.color,
+                theme::LATEX_COMMAND,
+                "near-miss typo must not highlight: {:#?}",
+                section
+            );
+            assert!(!section.format.italics);
+        }
+    }
+
+    #[test]
+    fn unmatched_emph_brace_leaves_span_unapplied() {
+        // No closing `}` before end-of-paragraph: the design says leave the
+        // span dim rather than coloring to end-of-text. Better an obvious
+        // miss than a runaway pink tail.
+        let text = "say \\emph{hello and never close";
+        let job = run_build_job(text, &[], None);
+        for section in &job.sections {
+            assert_ne!(section.format.color, theme::LATEX_COMMAND);
+            assert!(!section.format.italics);
+        }
+    }
+
+    #[test]
+    fn emph_brace_does_not_cross_paragraph_boundary() {
+        // `\n` inside the buffer terminates the search — `\emph{` on one
+        // line with the `}` on the next line is treated as unmatched.
+        let text = "say \\emph{hello\nworld} end";
+        let job = run_build_job(text, &[], None);
+        for section in &job.sections {
+            assert_ne!(section.format.color, theme::LATEX_COMMAND);
+            assert!(!section.format.italics);
+        }
+    }
+
+    #[test]
+    fn entity_inside_emph_keeps_entity_color_and_italic() {
+        // `\emph{Skari}` with Skari matched as a Character entity: the
+        // entity color outranks the LaTeX command color (priority 50 vs 0)
+        // and italic applies additively from the brace range.
+        let text = "and \\emph{Skari} arrives";
+        let hit = EntityHit {
+            start: 10,
+            end: 15, // "Skari"
+            entity_id: "skari".to_string(),
+            kind: EntityKind::Character,
+        };
+        let job = run_build_job_with_hits(text, &[hit], &[], None);
+
+        let body = section_for(&job, (10, 15));
+        assert_eq!(body.format.color, theme::ENTITY_CHARACTER);
+        assert!(body.format.italics);
+
+        let open = section_for(&job, (4, 10));
+        assert_eq!(open.format.color, theme::LATEX_COMMAND);
+        let close = section_for(&job, (15, 16));
+        assert_eq!(close.format.color, theme::LATEX_COMMAND);
+    }
+
+    #[test]
+    fn revision_underline_survives_over_nl() {
+        // A revision anchored over `\nl` must still show its underline —
+        // revisions outrank LaTeX command color, the underline is the
+        // primary visual signal regardless of what's beneath it.
+        let text = "first\\nl second";
+        let r = coach_revision(1, Pipeline::Prose, (5, 8)); // "\nl"
+        let job = run_build_job(text, &[r], None);
+        let section = section_for(&job, (5, 8));
         assert_eq!(section.format.underline.color, theme::REVISION_PROSE);
     }
 }
