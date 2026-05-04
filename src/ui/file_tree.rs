@@ -128,6 +128,12 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     apply_pending(app, pending);
 }
 
+// Hold-to-drag threshold for manuscript rows. A press shorter than this is a
+// click (opens the chapter); a longer hold — or any pointer movement past
+// egui's drag distance — engages the reorder drag. 0.5s feels deliberate
+// without making real drags feel laggy; tune here if it ever feels wrong.
+const MANUSCRIPT_LONG_PRESS_SECS: f64 = 0.5;
+
 fn draw_manuscript(
     ui: &mut egui::Ui,
     chapters: &[&Chapter],
@@ -136,7 +142,8 @@ fn draw_manuscript(
 ) {
     // Each manuscript row is both a drag source (so it can be picked up) and
     // a drop zone (so dropping on it inserts before that row). A trailing
-    // drop zone after the last row handles "drop at end".
+    // drop zone after the last row handles "drop at end". Drag is gated by
+    // press-and-hold so the row also receives plain clicks.
     let mut from_idx: Option<usize> = None;
     let mut to_idx: Option<usize> = None;
 
@@ -145,7 +152,7 @@ fn draw_manuscript(
         let payload = i;
         let frame = Frame::default().inner_margin(Margin::symmetric(2, 1));
         let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
-            ui.dnd_drag_source(row_id, payload, |ui| {
+            let clicked = manuscript_row_with_long_press_drag(ui, row_id, payload, |ui| {
                 draw_chapter_row(
                     ui,
                     chapter,
@@ -154,6 +161,9 @@ fn draw_manuscript(
                     pending,
                 );
             });
+            if clicked {
+                pending.open = Some(chapter.file_path.clone());
+            }
         });
         if let Some(p) = dropped {
             from_idx = Some(*p);
@@ -228,6 +238,72 @@ fn draw_orphans(
     }
 }
 
+/// Wrap a row body so that a quick press-release behaves as a click and a
+/// hold (≥ `MANUSCRIPT_LONG_PRESS_SECS`) or pointer movement past egui's drag
+/// distance engages a drag-and-drop. Returns `true` on the frame the row was
+/// click-released without engaging a drag.
+///
+/// Internally this is a fork of `Ui::dnd_drag_source` with two differences:
+/// the outer interaction senses click-and-drag (not drag-only, which would
+/// suppress click hit-testing on inner widgets), and a per-row press timer
+/// stored in `egui::Memory` forces the drag to engage on a long, stationary
+/// hold so the gesture isn't gated only on movement.
+fn manuscript_row_with_long_press_drag<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    payload: usize,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> bool {
+    let is_being_dragged = ui.ctx().is_being_dragged(id);
+
+    if is_being_dragged {
+        egui::DragAndDrop::set_payload(ui.ctx(), payload);
+
+        let layer_id = egui::LayerId::new(egui::Order::Tooltip, id);
+        let inner = ui.scope_builder(egui::UiBuilder::new().layer_id(layer_id), add_contents);
+        if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
+            let delta = pointer_pos - inner.response.rect.center();
+            ui.ctx().transform_layer_shapes(
+                layer_id,
+                egui::emath::TSTransform::from_translation(delta),
+            );
+        }
+        return false;
+    }
+
+    let inner = ui.scope(add_contents);
+    let response = ui
+        .interact(inner.response.rect, id, egui::Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Grab);
+
+    let press_time_id = id.with("press_time");
+    let now = ui.input(|i| i.time);
+
+    let was_long_press = if response.is_pointer_button_down_on() {
+        let pressed_at: f64 =
+            ui.data_mut(|d| *d.get_temp_mut_or_insert_with(press_time_id, || now));
+        // Repaint while held so the timer can elapse without external input.
+        ui.ctx().request_repaint();
+        let long = now - pressed_at >= MANUSCRIPT_LONG_PRESS_SECS;
+        if long {
+            ui.ctx().set_dragged_id(id);
+        }
+        long
+    } else {
+        // Pointer is up: read the press time before discarding it so we can
+        // suppress the click that egui would otherwise fire after a long but
+        // movement-free hold (egui's own click-suppression only kicks in
+        // beyond 0.8s, well past our 0.5s threshold).
+        let long = ui
+            .data(|d| d.get_temp::<f64>(press_time_id))
+            .is_some_and(|t| now - t >= MANUSCRIPT_LONG_PRESS_SECS);
+        ui.data_mut(|d| d.remove::<f64>(press_time_id));
+        long
+    };
+
+    response.clicked() && !was_long_press
+}
+
 fn draw_chapter_row(
     ui: &mut egui::Ui,
     chapter: &Chapter,
@@ -250,29 +326,27 @@ fn draw_chapter_row(
         text = text.color(Color32::WHITE).strong();
     }
 
-    // The selectable_label shows the row's selected state but won't receive
-    // clicks: in manuscript rows the dnd_drag_source wrapper above us covers
-    // it and egui's hit-test suppresses click-only widgets sitting under a
-    // drag-only widget. Opening the chapter goes through the explicit "open"
-    // button on the right instead, which sits on top of the drag layer.
+    // For manuscript rows the outer click-and-drag wrapper handles the open
+    // click, so the selectable_label is purely a visual marker for the
+    // selected row. For orphan rows there is no outer wrapper, so we fall
+    // back to a small Open button on the right.
     let row_response = ui.horizontal(|ui| {
         if in_manuscript {
             ui.label(RichText::new(icons::BARS).color(theme::TEXT_MUTED).small())
                 .on_hover_text("Drag to reorder");
         }
-        // Selectable_label is purely visual here — clicks are intercepted by
-        // the dnd_drag_source wrapper above. We keep it for the selected-row
-        // background highlight; the open button below is what actually opens.
         let _ = ui.selectable_label(is_current, text);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button(icons::PENCIL)
-                .on_hover_text("Open chapter")
-                .clicked()
-            {
-                pending.open = Some(chapter.file_path.clone());
-            }
-        });
+        if !in_manuscript {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button(icons::PENCIL)
+                    .on_hover_text("Open chapter")
+                    .clicked()
+                {
+                    pending.open = Some(chapter.file_path.clone());
+                }
+            });
+        }
     });
 
     row_response.response.context_menu(|ui| {
