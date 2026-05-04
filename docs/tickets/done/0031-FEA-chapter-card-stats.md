@@ -21,12 +21,12 @@ The Manuscript sidebar lists chapters by title only. To balance pacing across a 
 - Changes to `ChapterMeta` schema or the word-count algorithm.
 
 ## Acceptance criteria
-- [ ] Each manuscript row in the sidebar shows `¶ {paragraph_count} · {word_count} w` to the right of the title in muted color.
-- [ ] Each orphan row in the `ORPHANS` collapsing section shows the same badge, sitting before the existing Open pencil button.
-- [ ] Word counts ≥ 1000 use a thousands separator (`3420` → `3,420`).
-- [ ] Counts come from `chapter.meta.paragraphs.len()` and `chapter.meta.word_count`; no new computation introduced.
-- [ ] Editing and saving a chapter refreshes its row badge on the next `seed_meta` (existing behavior, verified visually).
-- [ ] `cargo clippy --all-targets --all-features` and `cargo test --all-targets --all-features` clean — 0 warnings, 0 errors.
+- [x] Each manuscript row in the sidebar shows `¶ {paragraph_count} · {word_count} w` to the right of the title in muted color.
+- [x] Each orphan row in the `ORPHANS` collapsing section shows the same badge, sitting before the existing Open pencil button.
+- [x] Word counts ≥ 1000 use a thousands separator (`3420` → `3,420`).
+- [x] Counts come from `chapter.meta.paragraphs.len()` and `chapter.meta.word_count`; no new computation introduced.
+- [x] Editing and saving a chapter refreshes its row badge on the next `seed_meta` (existing behavior, verified visually).
+- [x] `cargo clippy --all-targets --all-features` and `cargo test --all-targets --all-features` clean — 0 warnings, 0 errors.
 
 ## Design notes
 - Word-count formatting: a small inline helper (e.g. `format_thousands(n: usize) -> String`) keeps things free of a heavy `num-format` dep. Insert commas every three digits from the right.
