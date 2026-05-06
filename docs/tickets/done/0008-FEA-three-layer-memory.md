@@ -146,17 +146,17 @@ New `src/book/proposals.rs`:
 - Any change to coach pipelines — they continue to use whole-chapter prose until #0011 swaps in always-loaded context.
 
 ## Acceptance criteria
-- [ ] `EntityKind` has `Faction`, `Item`, `MagicRule` variants; folder names match scope spec.
-- [ ] On `Book::open`, `Info/Factions/`, `Info/Items/`, `Info/MagicRules/`, and `Info/agent/` are created if missing.
-- [ ] `book.accessors().characters().get("yara")` returns the Yara character; `.list()` returns all characters sorted by name.
-- [ ] `book.accessors().timeline().around("event_storm", 2)` returns the 5 events centred on `event_storm` ordered by `when`.
-- [ ] `Accessors` exposes no mutation method; only `&self` borrows. Verified by a compile-time test (a `fn _no_mut(a: &Accessors)` that calls every accessor).
-- [ ] Round-trip: write a `SceneRecord` skeleton (with empty `beats`, etc.) via `agent_layer::save_scene_record`; reload via `agent_layer::load_scene_record`; equal.
-- [ ] Round-trip: queue a proposal, list it as pending, confirm it, observe the Author Layer mutation.
-- [ ] `agent_layer::is_stale` returns `true` when any `source_refs` paragraph hash has changed; `false` for unchanged; `false` for `pinned == true` regardless of source hashes.
-- [ ] Empty `Info/agent/mentions.json` round-trips; `agent.set_mentions(id, refs)` persists; accessor `characters.mentions(id)` returns the persisted refs.
-- [ ] Existing entity files (`Info/Characters/*.json`) load unchanged — no schema migration required.
-- [ ] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
+- [x] `EntityKind` has `Faction`, `Item`, `MagicRule` variants; folder names match scope spec.
+- [x] On `Book::open`, `Info/Factions/`, `Info/Items/`, `Info/MagicRules/`, and `Info/agent/` are created if missing.
+- [x] `book.accessors().characters().get("yara")` returns the Yara character; `.list()` returns all characters sorted by name.
+- [x] `book.accessors().timeline().around("event_storm", 2)` returns the 5 events centred on `event_storm` ordered by `when`.
+- [x] `Accessors` exposes no mutation method; only `&self` borrows. Verified by a compile-time test (a `fn _no_mut(a: &Accessors)` that calls every accessor).
+- [x] Round-trip: write a `SceneRecord` skeleton (with empty `beats`, etc.) via `agent_layer::save_scene_record`; reload via `agent_layer::load_scene_record`; equal.
+- [x] Round-trip: queue a proposal, list it as pending, confirm it, observe the Author Layer mutation.
+- [x] `agent_layer::is_stale` returns `true` when any `source_refs` paragraph hash has changed; `false` for unchanged; `false` for `pinned == true` regardless of source hashes.
+- [x] Empty `Info/agent/mentions.json` round-trips; `agent.set_mentions(id, refs)` persists; accessor `characters.mentions(id)` returns the persisted refs.
+- [x] Existing entity files (`Info/Characters/*.json`) load unchanged — no schema migration required.
+- [x] `cargo clippy` and `cargo test` clean (0 warnings, 0 errors).
 
 ## Design notes
 - **Why extend the existing `Entity` struct instead of splitting per-kind?** v1 cost/benefit: the typed accessors give the agent the API it needs without rewriting every UI consumer. Splitting can happen later as a pure refactor, gated on a clippy/arch rule that forbids referencing kind-specific fields outside that kind's accessor view.
@@ -165,3 +165,19 @@ New `src/book/proposals.rs`:
 - **Schema versioning.** Every persisted struct in `Info/agent/` carries `schema: u32`. Loaders accept `schema <= CURRENT_SCHEMA`; writers always emit `CURRENT_SCHEMA`. Bump on incompatible field changes; add `#[serde(default)]` for compatible additions.
 - **Why no auto-invalidation on edit?** The save path already runs the paragraph matcher (#0002). Computing `is_stale` for every Agent Layer artifact on every save would scale with N artifacts; doing it on read scales with N reads of stale artifacts (typically zero — the orchestrator re-derives lazily). Re-evaluate if read latency suffers.
 - **Trust boundary enforcement is in #0009**, not here. This ticket ships the proposal storage; the rule "skills cannot call `Book::save_entity`" is enforced by the tool registry the orchestrator hands to skills.
+
+## Status notes (2026-05-04 — parked mid-flight on `wip/0008-three-layer-memory`; resumed 2026-05-06)
+
+### Done (originally on wip branch; re-applied to current master in resume because #0033 changed `Entities::load`)
+- `EntityKind` extended with `Faction`, `Item`, `MagicRule`. Folder names match scope.
+- `EntityKind::ALL` const added so loaders/accessors iterate canonically.
+- `#[serde(rename_all = "lowercase")]` → `"snake_case"`. No-op for the existing single-word kinds (their JSON tag stays the same); the new `MagicRule` serializes as `"magic_rule"` instead of `"magicrule"`.
+- All exhaustive `EntityKind` match sites extended: `entity::folder/label`, `app::entity::kind_singular_id`, `ui::editor::entity_kind_byte`, `ui::inspector::entity_label` (added `(fac)` / `(item)` / `(rule)` chips).
+
+### Decisions already made (don't relitigate on resume)
+- `is_stale(meta, paragraphs: &[ParagraphMeta])` — slice rather than `&[Paragraph]` (the runtime variant from `paragraphs.rs`) so callers can pass the persisted index directly. Document the deviation from scope inline.
+- `compute_source_hash(refs, |id| Option<String>) -> Option<String>` — closure-based lookup so callers can union paragraphs across chapters; returns `None` when any ref is missing (the `is_stale` short-circuit for deleted paragraphs).
+- Source-hash domain: blake3 over `id:hash\n` per ref, truncated to 16 hex (consistent with `paragraphs.rs::HASH_HEX_LEN`). Including the id prevents collisions where two paragraphs could swap IDs but keep the same multiset of hashes.
+- Proposal IDs: `format!("prop_{micros:030}")` with collision-bump-by-1, since the project has no `ulid` crate. Sortable + monotonic, which is what the queue needs.
+- `KindView::mentions(id)` reads `book.agent_layer.mentions_of(id)` regardless of kind — `mentions.json` doesn't store kind, the accessor is per-kind for ergonomics only.
+- `TimelineView::around(id, n)` sorts by `when` lexically, finds `id`'s index, returns `[center-n, center+n]` clamped — yields `2n+1` events at the centre, fewer near the edges.

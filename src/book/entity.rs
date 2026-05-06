@@ -4,13 +4,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum EntityKind {
     #[default]
     Character,
     Location,
     Event,
     Timeline,
+    Faction,
+    Item,
+    MagicRule,
 }
 
 impl EntityKind {
@@ -20,6 +23,9 @@ impl EntityKind {
             EntityKind::Location => "Locations",
             EntityKind::Event => "Events",
             EntityKind::Timeline => "Timeline",
+            EntityKind::Faction => "Factions",
+            EntityKind::Item => "Items",
+            EntityKind::MagicRule => "MagicRules",
         }
     }
 
@@ -30,8 +36,21 @@ impl EntityKind {
             EntityKind::Location => "Locations",
             EntityKind::Event => "Events",
             EntityKind::Timeline => "Timeline",
+            EntityKind::Faction => "Factions",
+            EntityKind::Item => "Items",
+            EntityKind::MagicRule => "Magic Rules",
         }
     }
+
+    pub const ALL: [EntityKind; 7] = [
+        EntityKind::Character,
+        EntityKind::Location,
+        EntityKind::Event,
+        EntityKind::Timeline,
+        EntityKind::Faction,
+        EntityKind::Item,
+        EntityKind::MagicRule,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,13 +277,13 @@ impl Entities {
             load_entity_dir(&dir, EntityKind::Character, &mut by_id);
         }
 
-        // Locations / Events / Timeline are still hardcoded at
-        // `Info/<KindFolder>` for v1 (#0033 out-of-scope).
-        for kind in [
-            EntityKind::Location,
-            EntityKind::Event,
-            EntityKind::Timeline,
-        ] {
+        // Every non-character kind is still hardcoded at `Info/<KindFolder>`
+        // for v1 (#0033 out-of-scope). Iterates `EntityKind::ALL` so new
+        // kinds (Faction, Item, MagicRule — #0008) light up automatically.
+        for kind in EntityKind::ALL {
+            if kind == EntityKind::Character {
+                continue;
+            }
             let dir = root.join("Info").join(kind.folder());
             load_entity_dir(&dir, kind, &mut by_id);
         }

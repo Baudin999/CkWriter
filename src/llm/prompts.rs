@@ -307,6 +307,8 @@ mod tests {
     use crate::book::data::BookData;
     use crate::book::entity::Entities;
     use crate::book::manuscript::Manuscript;
+    use crate::book::agent_layer::AgentLayer;
+    use crate::book::proposals::Proposals;
     use crate::book::suggestions::SuggestionStore;
     use crate::book::tree::FileNode;
     use crate::book::{Book, BookConfig};
@@ -334,6 +336,14 @@ mod tests {
             config: BookConfig::default(),
             data: BookData::default(),
             suggestions: SuggestionStore::default(),
+            // Test-only `Book` — agent layer & proposals point at temp paths
+            // that no test in this module ever writes through. The build_system
+            // prompt logic doesn't touch them; we just need a valid value.
+            agent_layer: AgentLayer {
+                root: PathBuf::new(),
+                mentions: Default::default(),
+            },
+            proposals: Proposals::default(),
         }
     }
 

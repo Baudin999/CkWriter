@@ -1,3 +1,5 @@
+pub mod accessors;
+pub mod agent_layer;
 pub mod chapter_meta;
 pub mod chapters;
 pub mod data;
@@ -7,14 +9,18 @@ pub mod init;
 pub mod latex;
 pub mod manuscript;
 pub mod paragraphs;
+pub mod proposals;
 pub mod suggestions;
 pub mod tree;
 
+use accessors::Accessors;
+use agent_layer::AgentLayer;
 use anyhow::{anyhow, Result};
 use chapter_meta::ChapterMeta;
 use data::BookData;
 use entity::{Entities, Entity, EntityKind};
 use manuscript::Manuscript;
+use proposals::Proposals;
 use std::path::{Path, PathBuf};
 use suggestions::SuggestionStore;
 use tree::FileNode;
@@ -58,6 +64,20 @@ pub struct Book {
     /// `Info/suggestions/<folder>/<name>.json`. Replaces the old
     /// `coach-dismissals.json` (migrated on first open).
     pub suggestions: SuggestionStore,
+    /// Agent Layer storage — model-derived artifacts under `Info/agent/`.
+    /// See ticket #0008. The skill framework that produces artifacts is
+    /// #0009; v1 ships storage primitives so later tickets can light up
+    /// without schema migrations.
+    // First reader is the orchestrator (#0009); the field is wired up here
+    // so #0009 doesn't need to thread it back into Book.
+    #[allow(dead_code)]
+    pub agent_layer: AgentLayer,
+    /// Pending + resolved Agent → Author proposals. The trust boundary
+    /// (skills can only mutate canon through `propose`) is enforced at the
+    /// orchestrator (#0009), not here.
+    // Same as `agent_layer`: ships ahead of its first non-test caller.
+    #[allow(dead_code)]
+    pub proposals: Proposals,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -152,6 +172,14 @@ impl Book {
 
         let chapters_list = build_chapters(root, &manuscript, &config.manuscript_folders);
 
+        // Idempotent folder bootstrap for the new Author Layer kinds (#0008)
+        // and the Agent Layer root. Existing books just see mkdir -p no-ops.
+        for kind_folder in ["Factions", "Items", "MagicRules"] {
+            let _ = std::fs::create_dir_all(root.join("Info").join(kind_folder));
+        }
+        let agent_layer = AgentLayer::open(root)?;
+        let proposals = Proposals::open(root);
+
         let entities = Entities::load(root, &config.authors_folders);
         let data = BookData::load(root);
 
@@ -181,7 +209,28 @@ impl Book {
             config,
             data,
             suggestions,
+            agent_layer,
+            proposals,
         })
+    }
+
+    /// Typed read-only view over the Author Layer (`characters`, `locations`,
+    /// `factions`, `items`, `magic_rules`, `timeline`). Mutation goes through
+    /// `Book::save_entity` (direct author edits) or
+    /// `Book::confirm_proposal` (agent-originated changes).
+    // First non-test caller is the orchestrator (#0009); shipping the entry
+    // point here so the orchestrator borrows from Book directly.
+    #[allow(dead_code)]
+    pub fn accessors(&self) -> Accessors<'_> {
+        Accessors::new(self)
+    }
+
+    /// Apply a pending proposal: writes to the Author Layer, marks the
+    /// proposal confirmed, and persists. Wraps `Proposals::confirm` so the
+    /// double-borrow on `&mut Book` doesn't surface to callers.
+    #[allow(dead_code)] // wired up by the inspector UI in a later ticket
+    pub fn confirm_proposal(&mut self, id: &str) -> Result<()> {
+        self.proposals.confirm(id, &mut self.entities, &self.root)
     }
 
     pub fn title(&self) -> &str {

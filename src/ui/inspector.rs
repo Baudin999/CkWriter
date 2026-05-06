@@ -392,6 +392,9 @@ fn entity_label(e: &Entity) -> String {
         EntityKind::Location => format!("{} (loc)", e.name),
         EntityKind::Event => format!("{} (ev)", e.name),
         EntityKind::Timeline => format!("{} (tl)", e.name),
+        EntityKind::Faction => format!("{} (fac)", e.name),
+        EntityKind::Item => format!("{} (item)", e.name),
+        EntityKind::MagicRule => format!("{} (rule)", e.name),
     }
 }
 

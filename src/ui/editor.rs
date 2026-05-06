@@ -1190,6 +1190,9 @@ fn entity_kind_byte(k: EntityKind) -> u8 {
         EntityKind::Location => 1,
         EntityKind::Event => 2,
         EntityKind::Timeline => 3,
+        EntityKind::Faction => 4,
+        EntityKind::Item => 5,
+        EntityKind::MagicRule => 6,
     }
 }
 

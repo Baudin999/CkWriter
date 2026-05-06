@@ -142,5 +142,8 @@ fn kind_singular_id(k: EntityKind) -> &'static str {
         EntityKind::Location => "location",
         EntityKind::Event => "event",
         EntityKind::Timeline => "timeline",
+        EntityKind::Faction => "faction",
+        EntityKind::Item => "item",
+        EntityKind::MagicRule => "magic_rule",
     }
 }
