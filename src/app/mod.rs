@@ -899,35 +899,32 @@ impl App for CkWriterApp {
             }
         });
 
-        // Floating distraction-free toggle (#0032). Pinned to the top-right of
-        // the viewport via an Area so it survives when chrome panels are
-        // hidden — in distraction-free mode this is the only entry/exit
-        // point. Frameless + muted so it stays a hint, not a distraction.
-        let df = self.settings.distraction_free;
-        egui::Area::new(egui::Id::new("distraction-toggle"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                let (icon, tip) = if df {
-                    (icons::COMPRESS, "Exit distraction-free mode")
-                } else {
-                    (icons::EXPAND, "Enter distraction-free mode")
-                };
-                let resp = ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(icon)
-                                .color(theme::TEXT_MUTED)
-                                .size(16.0),
+        // Floating distraction-free toggle (#0032). Only painted while
+        // distraction-free is active — that's when chrome is hidden and the
+        // user has no other way to leave the mode. In normal mode the same
+        // toggle lives in the top bar (see ui::top_bar) so it doesn't overlap
+        // and steal clicks from the chrome buttons underneath.
+        if self.settings.distraction_free {
+            egui::Area::new(egui::Id::new("distraction-toggle"))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let resp = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(icons::COMPRESS)
+                                    .color(theme::TEXT_MUTED)
+                                    .size(16.0),
+                            )
+                            .frame(false),
                         )
-                        .frame(false),
-                    )
-                    .on_hover_text(tip);
-                if resp.clicked() {
-                    self.settings.distraction_free = !df;
-                    self.settings_dirty = true;
-                }
-            });
+                        .on_hover_text("Exit distraction-free mode");
+                    if resp.clicked() {
+                        self.settings.distraction_free = false;
+                        self.settings_dirty = true;
+                    }
+                });
+        }
 
         self.book_picker(ctx);
         self.new_chapter_dialog(ctx);

@@ -89,6 +89,15 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 }
             }
             ui.separator();
+            if ui
+                .button(format!("{}  Focus", icons::EXPAND))
+                .on_hover_text("Enter distraction-free mode")
+                .clicked()
+            {
+                app.settings.distraction_free = true;
+                app.settings_dirty = true;
+            }
+            ui.separator();
             let dot = if app.ollama_ok {
                 RichText::new("●").color(Color32::from_rgb(0x9e, 0xce, 0x6a))
             } else {
