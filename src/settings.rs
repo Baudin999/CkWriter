@@ -103,6 +103,12 @@ pub struct Settings {
     /// switch.
     #[serde(default)]
     pub distraction_free: bool,
+    /// Mouse-wheel scroll distance in pixels per line-unit notch. Drives
+    /// `egui::Options::line_scroll_speed`; egui's native default is 40, which
+    /// feels glacial in long-form reading. Touchpad smooth-scroll arrives in
+    /// point units and is unaffected by this value.
+    #[serde(default = "default_scroll_speed")]
+    pub scroll_speed: f32,
 }
 
 fn default_model() -> String {
@@ -141,6 +147,9 @@ fn default_coach_temperature() -> f32 {
 fn default_coach_filter_dismissed() -> bool {
     true
 }
+fn default_scroll_speed() -> f32 {
+    120.0
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -164,6 +173,7 @@ impl Default for Settings {
             coach_temperature: default_coach_temperature(),
             coach_filter_dismissed: default_coach_filter_dismissed(),
             distraction_free: false,
+            scroll_speed: default_scroll_speed(),
         }
     }
 }

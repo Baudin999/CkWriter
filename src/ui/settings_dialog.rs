@@ -147,6 +147,21 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                 changed = true;
             }
 
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("scroll speed (mouse wheel)")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            let resp = ui.add(
+                egui::Slider::new(&mut app.settings.scroll_speed, 40.0..=400.0)
+                    .step_by(10.0)
+                    .suffix(" px/notch"),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+
             ui.add_space(12.0);
             ui.label(
                 RichText::new("Editor")
