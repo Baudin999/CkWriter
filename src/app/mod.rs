@@ -8,6 +8,7 @@ use crate::llm;
 use crate::llm::characters::ProposedCharacter;
 use crate::llm::prompts::Pipeline;
 use crate::llm::revision::Revision;
+use crate::icons;
 use crate::settings::Settings;
 use crate::theme;
 use crate::ui;
@@ -818,68 +819,74 @@ impl App for CkWriterApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
 
-        egui::TopBottomPanel::top("top").show(ctx, |ui| ui::top_bar::show(self, ui));
+        // Distraction-free mode (#0032) suppresses every chrome panel; only
+        // the central editor + the floating toggle button paint. Coach
+        // pipelines, dirty tracking, and entity scanning all keep running —
+        // this is a pure view switch.
+        if !self.settings.distraction_free {
+            egui::TopBottomPanel::top("top").show(ctx, |ui| ui::top_bar::show(self, ui));
 
-        let left_resp = egui::SidePanel::left("chapters")
-            .default_width(self.settings.left_panel_width)
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui::file_tree::show(self, ui);
-            });
-        let lw = left_resp.response.rect.width();
-        if (lw - self.settings.left_panel_width).abs() > 1.0 {
-            self.settings.left_panel_width = lw;
-            self.settings_dirty = true;
-        }
+            let left_resp = egui::SidePanel::left("chapters")
+                .default_width(self.settings.left_panel_width)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui::file_tree::show(self, ui);
+                });
+            let lw = left_resp.response.rect.width();
+            if (lw - self.settings.left_panel_width).abs() > 1.0 {
+                self.settings.left_panel_width = lw;
+                self.settings_dirty = true;
+            }
 
-        // Defensive clamp: an earlier bug let the panel widen onto the editor
-        // area; re-opening the app would honour that bad width otherwise.
-        let saved_rw = self.settings.right_panel_width.clamp(280.0, 1200.0);
-        // Cast / Personae render their own master/detail inline, so the bottom
-        // inspector would just duplicate the same form.
-        let inline_detail_active = self.scope_tab == ui::scope_panel::Tab::Characters
-            && matches!(
-                self.char_sub_tab,
-                ui::scope_panel::CharSubTab::Cast | ui::scope_panel::CharSubTab::Personae
+            // Defensive clamp: an earlier bug let the panel widen onto the editor
+            // area; re-opening the app would honour that bad width otherwise.
+            let saved_rw = self.settings.right_panel_width.clamp(280.0, 1200.0);
+            // Cast / Personae render their own master/detail inline, so the bottom
+            // inspector would just duplicate the same form.
+            let inline_detail_active = self.scope_tab == ui::scope_panel::Tab::Characters
+                && matches!(
+                    self.char_sub_tab,
+                    ui::scope_panel::CharSubTab::Cast | ui::scope_panel::CharSubTab::Personae
+                );
+            // Entity details only belong on tabs that are about entities — keeping
+            // them visible on AI / Chat / Chapter leaks an unrelated character
+            // form under the panel.
+            let inspector_relevant = matches!(
+                self.scope_tab,
+                ui::scope_panel::Tab::Characters | ui::scope_panel::Tab::Locations
             );
-        // Entity details only belong on tabs that are about entities — keeping
-        // them visible on AI / Chat / Chapter leaks an unrelated character
-        // form under the panel.
-        let inspector_relevant = matches!(
-            self.scope_tab,
-            ui::scope_panel::Tab::Characters | ui::scope_panel::Tab::Locations
-        );
-        let bottom_inspector =
-            self.selected_entity.is_some() && !inline_detail_active && inspector_relevant;
-        let right_resp = egui::SidePanel::right("scope")
-            .default_width(saved_rw)
-            .resizable(true)
-            .show(ctx, |ui| {
-                if bottom_inspector {
-                    let total_h = ui.available_height();
-                    let scope_h = (total_h * 0.50).clamp(180.0, (total_h - 200.0).max(180.0));
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), scope_h),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui::scope_panel::show(self, ui);
-                        },
-                    );
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt("inspector-scroll")
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            ui::inspector::show(self, ui);
-                        });
-                } else {
-                    ui::scope_panel::show(self, ui);
-                }
-            });
-        let rw = right_resp.response.rect.width();
-        if (rw - self.settings.right_panel_width).abs() > 1.0 {
-            self.settings.right_panel_width = rw;
-            self.settings_dirty = true;
+            let bottom_inspector =
+                self.selected_entity.is_some() && !inline_detail_active && inspector_relevant;
+            let right_resp = egui::SidePanel::right("scope")
+                .default_width(saved_rw)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if bottom_inspector {
+                        let total_h = ui.available_height();
+                        let scope_h = (total_h * 0.50).clamp(180.0, (total_h - 200.0).max(180.0));
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), scope_h),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui::scope_panel::show(self, ui);
+                            },
+                        );
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("inspector-scroll")
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                ui::inspector::show(self, ui);
+                            });
+                    } else {
+                        ui::scope_panel::show(self, ui);
+                    }
+                });
+            let rw = right_resp.response.rect.width();
+            if (rw - self.settings.right_panel_width).abs() > 1.0 {
+                self.settings.right_panel_width = rw;
+                self.settings_dirty = true;
+            }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -891,6 +898,36 @@ impl App for CkWriterApp {
                 ui::editor::show(self, ui);
             }
         });
+
+        // Floating distraction-free toggle (#0032). Pinned to the top-right of
+        // the viewport via an Area so it survives when chrome panels are
+        // hidden — in distraction-free mode this is the only entry/exit
+        // point. Frameless + muted so it stays a hint, not a distraction.
+        let df = self.settings.distraction_free;
+        egui::Area::new(egui::Id::new("distraction-toggle"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (icon, tip) = if df {
+                    (icons::COMPRESS, "Exit distraction-free mode")
+                } else {
+                    (icons::EXPAND, "Enter distraction-free mode")
+                };
+                let resp = ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(icon)
+                                .color(theme::TEXT_MUTED)
+                                .size(16.0),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text(tip);
+                if resp.clicked() {
+                    self.settings.distraction_free = !df;
+                    self.settings_dirty = true;
+                }
+            });
 
         self.book_picker(ctx);
         self.new_chapter_dialog(ctx);

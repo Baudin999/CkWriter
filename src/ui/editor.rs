@@ -115,8 +115,21 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
     let letter_spacing = app.settings.editor_letter_spacing;
     let max_column_width = app.settings.editor_column_width;
     let family = editor_family(app);
-    let entity_hits = app.entity_hits.clone();
-    let revisions: Vec<Revision> = app.revisions.clone();
+    // Distraction-free mode (#0032): zero out the entity + revision slices
+    // feeding the layout/hover paths so neither decoration nor tooltip paints.
+    // Coach pipelines still update `app.entity_hits` / `app.revisions` in the
+    // background — leaving the mode shows whatever has accumulated.
+    let distraction_free = app.settings.distraction_free;
+    let entity_hits = if distraction_free {
+        Vec::new()
+    } else {
+        app.entity_hits.clone()
+    };
+    let revisions: Vec<Revision> = if distraction_free {
+        Vec::new()
+    } else {
+        app.revisions.clone()
+    };
     let selected_revision = app.selected_revision;
     let entity_hits_for_hover = entity_hits.clone();
     let revisions_for_hover = revisions.clone();
@@ -353,7 +366,7 @@ pub fn show(app: &mut CkWriterApp, ui: &mut egui::Ui) {
                 // against a stable backdrop.
                 let mut play_clicked: Option<String> = None;
                 let mut clear_clicked: Option<String> = None;
-                if !paragraph_gutter_marks.is_empty() {
+                if !paragraph_gutter_marks.is_empty() && !app.settings.distraction_free {
                     let gutter_x =
                         output.galley_pos.x - GUTTER_GAP_PX - GUTTER_WIDTH_PX * 0.5;
                     let bar_left_edge =

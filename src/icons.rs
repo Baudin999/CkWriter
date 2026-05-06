@@ -21,3 +21,5 @@ pub const EXCHANGE: &str = "\u{f0ec}";
 pub const BARS: &str = "\u{f0c9}";
 pub const TRASH: &str = "\u{f1f8}";
 pub const PLAY: &str = "\u{f04b}";
+pub const EXPAND: &str = "\u{f065}";
+pub const COMPRESS: &str = "\u{f066}";

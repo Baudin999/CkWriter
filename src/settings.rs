@@ -97,6 +97,12 @@ pub struct Settings {
     /// and "thinks about" those passages — this is a presentation filter only.
     #[serde(default = "default_coach_filter_dismissed")]
     pub coach_filter_dismissed: bool,
+    /// Distraction-free writing mode (#0032). When true, all chrome panels and
+    /// editor decorations except LaTeX command highlighting are suppressed.
+    /// Coach pipelines and dirty tracking keep running — this is a pure view
+    /// switch.
+    #[serde(default)]
+    pub distraction_free: bool,
 }
 
 fn default_model() -> String {
@@ -157,6 +163,7 @@ impl Default for Settings {
             chapter_places: HashMap::new(),
             coach_temperature: default_coach_temperature(),
             coach_filter_dismissed: default_coach_filter_dismissed(),
+            distraction_free: false,
         }
     }
 }
