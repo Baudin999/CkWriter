@@ -3,6 +3,7 @@ pub mod chapters;
 pub mod data;
 pub mod dismissals;
 pub mod entity;
+pub mod init;
 pub mod latex;
 pub mod manuscript;
 pub mod paragraphs;
@@ -69,6 +70,21 @@ pub struct BookConfig {
     pub voice_prompt_file: String,
     #[serde(default = "default_roadmap")]
     pub roadmap_file: String,
+    /// Folders under the book root whose `.tex` files CkWriter manages — i.e.
+    /// the chapter folders (#0033). Was hardcoded as
+    /// `manuscript::MANAGED_FOLDERS = ["Ancient","Modern"]`; the default
+    /// here matches that so existing books keep working when `Info/index.json`
+    /// has no `manuscript_folders` key. Fresh projects from `init_project`
+    /// write `[]` and let the writer add folders via project settings.
+    #[serde(default = "manuscript::default_managed_folders")]
+    pub manuscript_folders: Vec<String>,
+    /// Folders relative to the book root that hold character entity JSONs
+    /// (#0033). The first entry is the canonical save location for new
+    /// characters; every entry contributes to the in-memory entity store on
+    /// `Book::open`. Locations / Events / Timeline kinds keep their hardcoded
+    /// folders for v1.
+    #[serde(default = "default_authors_folders")]
+    pub authors_folders: Vec<String>,
 }
 
 fn default_main() -> String {
@@ -80,6 +96,9 @@ fn default_voice_prompt() -> String {
 fn default_roadmap() -> String {
     "Info/World Building/Plot.txt".into()
 }
+fn default_authors_folders() -> Vec<String> {
+    vec!["Info/Characters".into()]
+}
 
 impl Default for BookConfig {
     fn default() -> Self {
@@ -88,7 +107,25 @@ impl Default for BookConfig {
             model: None,
             voice_prompt_file: default_voice_prompt(),
             roadmap_file: default_roadmap(),
+            manuscript_folders: manuscript::default_managed_folders(),
+            authors_folders: default_authors_folders(),
         }
+    }
+}
+
+impl BookConfig {
+    // Wired up by the project-folder editor in the same ticket (#0033 step 6);
+    // pre-existing call sites only ever read `Info/index.json` so nothing else
+    // exercises this yet.
+    #[allow(dead_code)]
+    pub fn save(&self, root: &Path) -> Result<()> {
+        let p = root.join("Info/index.json");
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let s = serde_json::to_string_pretty(self)?;
+        std::fs::write(&p, s)?;
+        Ok(())
     }
 }
 
@@ -103,14 +140,19 @@ impl Book {
             return Err(anyhow!("main TeX file not found: {}", main_tex.display()));
         }
 
-        let manuscript = load_or_seed_manuscript(root, &main_tex)?;
+        let manuscript = load_or_seed_manuscript(root, &main_tex, &config.manuscript_folders)?;
         // Reconcile filenames + main.tex against the manuscript. Idempotent —
         // does nothing on subsequent opens unless something drifted.
-        chapters::commit(root, &config.main_tex, &manuscript)?;
+        chapters::commit(
+            root,
+            &config.main_tex,
+            &manuscript,
+            &config.manuscript_folders,
+        )?;
 
-        let chapters_list = build_chapters(root, &manuscript);
+        let chapters_list = build_chapters(root, &manuscript, &config.manuscript_folders);
 
-        let entities = Entities::load(root);
+        let entities = Entities::load(root, &config.authors_folders);
         let data = BookData::load(root);
 
         // Migrate the legacy `Info/coach-dismissals.json` to the per-chapter
@@ -157,7 +199,8 @@ impl Book {
     /// chapter operation. Cheaper than re-running `Book::open` because it
     /// skips entity/voice/roadmap reloads that aren't affected.
     pub fn reload_chapters(&mut self) {
-        self.chapters = build_chapters(&self.root, &self.manuscript);
+        self.chapters =
+            build_chapters(&self.root, &self.manuscript, &self.config.manuscript_folders);
         self.file_tree = FileNode::build(&self.root);
     }
 
@@ -182,7 +225,7 @@ impl Book {
     }
 
     pub fn reload_entities(&mut self) {
-        self.entities = Entities::load(&self.root);
+        self.entities = Entities::load(&self.root, &self.config.authors_folders);
     }
 }
 
@@ -203,7 +246,11 @@ fn read_chapter_title(path: &Path) -> Option<String> {
 /// `\include{}` lines already in `main.tex`. Only paths shaped like
 /// `<managed-folder>/<NNN>_<name>` are migrated; anything else is left for
 /// the writer to handle by hand.
-fn load_or_seed_manuscript(root: &Path, main_tex: &Path) -> Result<Manuscript> {
+fn load_or_seed_manuscript(
+    root: &Path,
+    main_tex: &Path,
+    folders: &[String],
+) -> Result<Manuscript> {
     let path = manuscript::file_path(root);
     if path.exists() {
         return Ok(Manuscript::load(root));
@@ -215,7 +262,7 @@ fn load_or_seed_manuscript(root: &Path, main_tex: &Path) -> Result<Manuscript> {
             log::info!("seed_manuscript: skipping non-folder include {inc:?}");
             continue;
         };
-        if !manuscript::MANAGED_FOLDERS.contains(&folder) {
+        if !folders.iter().any(|f| f == folder) {
             log::info!("seed_manuscript: skipping unmanaged folder include {inc:?}");
             continue;
         }
@@ -233,7 +280,7 @@ fn load_or_seed_manuscript(root: &Path, main_tex: &Path) -> Result<Manuscript> {
 /// Build the in-memory chapter list: every manuscript entry first (with
 /// derived numbered file paths), then orphans (files in managed folders that
 /// aren't in the manuscript).
-fn build_chapters(root: &Path, manuscript: &Manuscript) -> Vec<Chapter> {
+fn build_chapters(root: &Path, manuscript: &Manuscript, folders: &[String]) -> Vec<Chapter> {
     let mut out: Vec<Chapter> = Vec::with_capacity(manuscript.chapters.len());
     let mut per_folder_pos: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
@@ -259,7 +306,7 @@ fn build_chapters(root: &Path, manuscript: &Manuscript) -> Vec<Chapter> {
         *pos += 1;
     }
 
-    let listings = chapters::list_folders(root, manuscript);
+    let listings = chapters::list_folders(root, manuscript, folders);
     let mut orphan_keys: Vec<&String> = listings.keys().collect();
     orphan_keys.sort();
     for folder in orphan_keys {
@@ -455,6 +502,30 @@ mod tests {
         let p = std::env::temp_dir().join(format!("ckwriter-book-mod-{nanos}"));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn book_config_defaults_match_writer_legacy_layout() {
+        // An older `Info/index.json` with no folder-list keys must keep
+        // working: the writer's existing book has no manuscript_folders /
+        // authors_folders entries on disk yet, and #0033 must not break it.
+        let raw = r#"{"main_tex":"main.tex"}"#;
+        let cfg: BookConfig = serde_json::from_str(raw).expect("parse legacy index.json");
+        assert_eq!(cfg.manuscript_folders, vec!["Ancient", "Modern"]);
+        assert_eq!(cfg.authors_folders, vec!["Info/Characters"]);
+    }
+
+    #[test]
+    fn book_config_round_trips_explicit_lists() {
+        let cfg = BookConfig {
+            manuscript_folders: vec!["Manuscript".into()],
+            authors_folders: vec!["People".into(), "Cast".into()],
+            ..BookConfig::default()
+        };
+        let s = serde_json::to_string(&cfg).unwrap();
+        let back: BookConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.manuscript_folders, vec!["Manuscript"]);
+        assert_eq!(back.authors_folders, vec!["People", "Cast"]);
     }
 
     #[test]

@@ -44,7 +44,7 @@ impl super::CkWriterApp {
         if original_id != e.id {
             // remove old file
             if let Some(old) = book.entity(&original_id).cloned() {
-                let _ = std::fs::remove_file(old.file_path(&book.root));
+                let _ = std::fs::remove_file(book.entities.file_path_for(&book.root, &old));
                 book.entities.by_id.remove(&original_id);
             }
         }

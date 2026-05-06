@@ -5,10 +5,10 @@ use std::path::Path;
 /// Parse `Info/Characters/Personae.txt` (or whatever lives there) and write
 /// per-character JSON files. Idempotent — never overwrites existing JSON.
 /// Returns the number of new entities written.
-pub fn import_personae(root: &Path) -> Result<usize> {
+pub fn import_personae(root: &Path, authors_folders: &[String]) -> Result<usize> {
     let personae = root.join("Info/Characters/Personae.txt");
     let text = std::fs::read_to_string(&personae)?;
-    let mut existing = Entities::load(root);
+    let mut existing = Entities::load(root, authors_folders);
     let mut written = 0usize;
 
     let mut current_section = String::from("Characters");
@@ -102,8 +102,12 @@ fn pull_aliases(rest: &str) -> Option<Vec<String>> {
 /// Quick scan for proper-noun "names" listed one-per-line in the simpler
 /// Info/Characters/*.tex files. Best-effort.
 #[allow(dead_code)]
-pub fn import_locations_seed(root: &Path, names: &[&str]) -> Result<usize> {
-    let mut existing = Entities::load(root);
+pub fn import_locations_seed(
+    root: &Path,
+    authors_folders: &[String],
+    names: &[&str],
+) -> Result<usize> {
+    let mut existing = Entities::load(root, authors_folders);
     let mut written = 0usize;
     for n in names {
         let id = slugify(n);

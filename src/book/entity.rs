@@ -127,7 +127,16 @@ impl Entity {
         v
     }
 
+    /// On-disk path for *non-character* entities (Locations / Events /
+    /// Timeline), which still live at the v0 hardcoded `Info/<Kind>/<id>.json`
+    /// location. For `Character`, ask `Entities::file_path_for` instead — the
+    /// canonical save folder is configurable per book (#0033) and lives on
+    /// `Entities::authors_folders`.
     pub fn file_path(&self, root: &Path) -> PathBuf {
+        debug_assert!(
+            self.kind != EntityKind::Character,
+            "use Entities::file_path_for for Character entities — authors folder is configurable"
+        );
         root.join("Info")
             .join(self.kind.folder())
             .join(format!("{}.json", self.id))
@@ -232,40 +241,38 @@ pub fn slugify(name: &str) -> String {
 #[derive(Default)]
 pub struct Entities {
     pub by_id: BTreeMap<String, Entity>,
+    /// Folders relative to the book root that hold character entity JSONs
+    /// (#0033). The first entry is the canonical save target for new
+    /// characters; every entry is read from on `load`. Empty in tests that
+    /// only exercise `mirror_diff` or `slugify`.
+    pub authors_folders: Vec<String>,
 }
 
 impl Entities {
-    pub fn load(root: &Path) -> Self {
+    pub fn load(root: &Path, authors_folders: &[String]) -> Self {
         let mut by_id = BTreeMap::new();
+
+        // Characters live in the configurable authors folders.
+        for rel in authors_folders {
+            let dir = root.join(rel);
+            load_entity_dir(&dir, EntityKind::Character, &mut by_id);
+        }
+
+        // Locations / Events / Timeline are still hardcoded at
+        // `Info/<KindFolder>` for v1 (#0033 out-of-scope).
         for kind in [
-            EntityKind::Character,
             EntityKind::Location,
             EntityKind::Event,
             EntityKind::Timeline,
         ] {
             let dir = root.join("Info").join(kind.folder());
-            if !dir.is_dir() {
-                continue;
-            }
-            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("json") {
-                    continue;
-                }
-                match std::fs::read_to_string(&p) {
-                    Ok(s) => match serde_json::from_str::<Entity>(&s) {
-                        Ok(mut e) => {
-                            // Force kind to match folder so a misplaced file doesn't lie.
-                            e.kind = kind;
-                            by_id.insert(e.id.clone(), e);
-                        }
-                        Err(err) => log::warn!("entity parse failed {}: {err}", p.display()),
-                    },
-                    Err(err) => log::warn!("entity read failed {}: {err}", p.display()),
-                }
-            }
+            load_entity_dir(&dir, kind, &mut by_id);
         }
-        Self { by_id }
+
+        Self {
+            by_id,
+            authors_folders: authors_folders.to_vec(),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Entity> {
@@ -278,8 +285,25 @@ impl Entities {
         v
     }
 
+    /// On-disk path for an entity, accounting for the configurable authors
+    /// folder for `Character` (#0033). Falls back to the legacy hardcoded
+    /// `Info/Characters` if `authors_folders` is empty (defensive — every
+    /// real book has at least one entry through serde defaults).
+    pub fn file_path_for(&self, root: &Path, e: &Entity) -> PathBuf {
+        if e.kind == EntityKind::Character {
+            let rel = self
+                .authors_folders
+                .first()
+                .map(String::as_str)
+                .unwrap_or("Info/Characters");
+            root.join(rel).join(format!("{}.json", e.id))
+        } else {
+            e.file_path(root)
+        }
+    }
+
     pub fn save(&mut self, root: &Path, e: Entity) -> Result<()> {
-        let p = e.file_path(root);
+        let p = self.file_path_for(root, &e);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -287,6 +311,29 @@ impl Entities {
         std::fs::write(&p, json)?;
         self.by_id.insert(e.id.clone(), e);
         Ok(())
+    }
+}
+
+fn load_entity_dir(dir: &Path, kind: EntityKind, by_id: &mut BTreeMap<String, Entity>) {
+    if !dir.is_dir() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        match std::fs::read_to_string(&p) {
+            Ok(s) => match serde_json::from_str::<Entity>(&s) {
+                Ok(mut e) => {
+                    // Force kind to match folder so a misplaced file doesn't lie.
+                    e.kind = kind;
+                    by_id.insert(e.id.clone(), e);
+                }
+                Err(err) => log::warn!("entity parse failed {}: {err}", p.display()),
+            },
+            Err(err) => log::warn!("entity read failed {}: {err}", p.display()),
+        }
     }
 }
 
@@ -373,5 +420,75 @@ mod tests {
         assert_eq!(e.name, "Yara");
         assert_eq!(e.category, "");
         assert!(e.progression.is_empty());
+    }
+
+    fn entities_tempdir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!(
+            "ckwriter-entities-{}-{nanos}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn write_character_json(root: &Path, rel_dir: &str, id: &str, name: &str) {
+        let dir = root.join(rel_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = serde_json::json!({
+            "id": id,
+            "kind": "character",
+            "name": name,
+        });
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn load_reads_characters_from_every_authors_folder() {
+        let root = entities_tempdir();
+        write_character_json(&root, "Info/Characters", "yara", "Yara");
+        write_character_json(&root, "Info/Personae", "kal", "Kal");
+
+        let folders = vec!["Info/Characters".to_string(), "Info/Personae".to_string()];
+        let entities = Entities::load(&root, &folders);
+
+        assert!(entities.get("yara").is_some(), "Yara from primary folder");
+        assert!(entities.get("kal").is_some(), "Kal from secondary folder");
+        assert_eq!(entities.by_kind(EntityKind::Character).len(), 2);
+    }
+
+    #[test]
+    fn save_writes_character_to_first_authors_folder() {
+        let root = entities_tempdir();
+        let folders = vec!["Info/People".to_string(), "Info/Characters".to_string()];
+        let mut entities = Entities::load(&root, &folders);
+        let e = Entity::new(EntityKind::Character, "yara", "Yara");
+        entities.save(&root, e).unwrap();
+
+        // Saved into the *first* configured folder, not the legacy default.
+        assert!(root.join("Info/People/yara.json").exists());
+        assert!(!root.join("Info/Characters/yara.json").exists());
+    }
+
+    #[test]
+    fn file_path_for_falls_back_to_legacy_when_authors_folders_empty() {
+        let root = entities_tempdir();
+        let entities = Entities::load(&root, &[]);
+        let e = Entity::new(EntityKind::Character, "yara", "Yara");
+        assert_eq!(
+            entities.file_path_for(&root, &e),
+            root.join("Info/Characters/yara.json")
+        );
     }
 }

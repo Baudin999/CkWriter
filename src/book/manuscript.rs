@@ -21,12 +21,14 @@ pub const FILE_NAME: &str = "Info/manuscript.json";
 /// in by hand.
 pub const NUMBER_STRIDE: u32 = 10;
 
-/// Folders under the book root whose `.tex` files CkWriter manages. A file
-/// in any other directory is invisible to add/delete/reorder; a file inside
-/// these folders is either a manuscript chapter (numbered) or an orphan
-/// (un-numbered, parked). Hardcoded for v1; will move to BookConfig if a
-/// second project ever needs different folders.
-pub const MANAGED_FOLDERS: &[&str] = &["Ancient", "Modern"];
+/// Default manuscript folders. Used as the serde default for
+/// `BookConfig::manuscript_folders` so existing books whose `Info/index.json`
+/// predates that field keep opening with the writer's original layout
+/// (`Ancient` + `Modern`). Fresh projects (#0033) write an empty list and let
+/// the writer populate it via the project settings editor.
+pub fn default_managed_folders() -> Vec<String> {
+    vec!["Ancient".to_string(), "Modern".to_string()]
+}
 
 /// One slot in the manuscript. The folder is the directory under the book
 /// root (e.g. `Ancient`, `Modern`); `name` is the CamelCase identifier that

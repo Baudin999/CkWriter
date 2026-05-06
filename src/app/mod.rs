@@ -18,21 +18,18 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 /// In-progress state for the "+ New chapter" modal. Folder defaults to the
-/// first managed folder (`Ancient`) so the writer can usually just type a
-/// title and hit Enter.
-#[derive(Debug, Clone)]
+/// first manuscript folder configured for the open book so the writer can
+/// usually just type a title and hit Enter.
+#[derive(Debug, Clone, Default)]
 pub struct NewChapterDialog {
     pub folder: String,
     pub title: String,
 }
 
-impl Default for NewChapterDialog {
-    fn default() -> Self {
+impl NewChapterDialog {
+    pub fn new(manuscript_folders: &[String]) -> Self {
         Self {
-            folder: crate::book::manuscript::MANAGED_FOLDERS
-                .first()
-                .map(|s| (*s).to_string())
-                .unwrap_or_default(),
+            folder: manuscript_folders.first().cloned().unwrap_or_default(),
             title: String::new(),
         }
     }
@@ -173,12 +170,27 @@ pub struct CkWriterApp {
     // === Book picker / settings dialog / import ===
     pub show_book_picker: bool,
     pub picker_path: String,
+    /// Path the user last typed (or that was pre-filled) into the
+    /// "New project here" textbox of the welcome view (#0033). Distinct from
+    /// `picker_path` so the open and create flows don't fight over the same
+    /// buffer when the user is mid-typing.
+    pub new_project_path: String,
+    /// Inline error from the welcome view's New / Open buttons (#0033). Lives
+    /// on the modal, not on the global `last_error` toast, so the writer sees
+    /// "directory not empty" right next to the field they just typed in.
+    pub picker_error: Option<String>,
     /// Directory paths currently expanded in the file tree sidebar.
     pub expanded_dirs: HashSet<PathBuf>,
     /// Active tab in the left sidebar (Manuscript vs All Files).
     pub file_tree_tab: ui::file_tree::FileTreeTab,
     pub show_settings: bool,
     pub settings_dirty: bool,
+    /// `true` when the project-folder editor in the settings dialog (#0033)
+    /// has unsaved structural edits to `book.config.manuscript_folders` /
+    /// `authors_folders`. Persisted (and the book re-opened) on settings
+    /// dialog close so the file tree and entity store pick up the new lists
+    /// without a manual restart.
+    pub project_folders_dirty: bool,
     pub last_settings_save: f64,
     pub import_status: Option<String>,
 
@@ -320,10 +332,13 @@ impl CkWriterApp {
             available_models: Vec::new(),
             show_book_picker: false,
             picker_path: String::new(),
+            new_project_path: String::new(),
+            picker_error: None,
             expanded_dirs: HashSet::new(),
             file_tree_tab: ui::file_tree::FileTreeTab::default(),
             show_settings: false,
             settings_dirty: false,
+            project_folders_dirty: false,
             last_settings_save: 0.0,
             import_status: None,
             new_chapter_dialog: None,
@@ -524,47 +539,135 @@ impl CkWriterApp {
             return;
         }
         let mut open_now: Option<PathBuf> = None;
+        let mut create_now: Option<PathBuf> = None;
         let mut close = false;
 
-        egui::Window::new("Open book")
+        egui::Window::new("Open or create a CkWriter book")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_width(520.0)
             .show(ctx, |ui| {
-                ui.label("Path to book root (a directory containing main.tex):");
-                ui.add(egui::TextEdit::singleline(&mut self.picker_path).desired_width(420.0));
-                ui.horizontal(|ui| {
-                    if ui.button("Open").clicked() {
-                        open_now = Some(PathBuf::from(self.picker_path.trim()));
-                    }
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                });
                 if !self.settings.recent_books.is_empty() {
-                    ui.separator();
                     ui.label(
                         egui::RichText::new("recent")
                             .small()
+                            .strong()
                             .color(theme::TEXT_MUTED),
                     );
                     let recents = self.settings.recent_books.clone();
                     for r in recents {
-                        if ui.link(r.display().to_string()).clicked() {
-                            open_now = Some(r);
+                        let title = r
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_else(|| r.to_str().unwrap_or("(unknown)"))
+                            .to_string();
+                        if ui.button(&title).clicked() {
+                            open_now = Some(r.clone());
                         }
+                        ui.label(
+                            egui::RichText::new(r.display().to_string())
+                                .small()
+                                .color(theme::TEXT_MUTED),
+                        );
+                        ui.add_space(2.0);
                     }
+                    ui.separator();
                 }
+
+                ui.label(
+                    egui::RichText::new("open existing folder")
+                        .small()
+                        .strong()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.label(
+                    egui::RichText::new("Path to a book root (directory containing main.tex):")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add(egui::TextEdit::singleline(&mut self.picker_path).desired_width(480.0));
+                ui.horizontal(|ui| {
+                    let enabled = !self.picker_path.trim().is_empty();
+                    if ui
+                        .add_enabled(enabled, egui::Button::new("Open"))
+                        .clicked()
+                    {
+                        open_now = Some(PathBuf::from(self.picker_path.trim()));
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                ui.label(
+                    egui::RichText::new("new project")
+                        .small()
+                        .strong()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Path to an empty directory. main.tex, Info/manuscript.json, and \
+                        Info/index.json will be created.",
+                    )
+                    .small()
+                    .color(theme::TEXT_MUTED),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_project_path).desired_width(480.0),
+                );
+                ui.horizontal(|ui| {
+                    let enabled = !self.new_project_path.trim().is_empty();
+                    if ui
+                        .add_enabled(enabled, egui::Button::new("New project here"))
+                        .clicked()
+                    {
+                        create_now = Some(PathBuf::from(self.new_project_path.trim()));
+                    }
+                });
+
+                if let Some(err) = &self.picker_error {
+                    ui.add_space(6.0);
+                    ui.colored_label(theme::ERROR, egui::RichText::new(err).small());
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
             });
 
-        if let Some(p) = open_now {
-            if let Err(e) = self.open_book(&p) {
-                self.last_error = Some(format!("open book: {e}"));
-            } else {
-                self.show_book_picker = false;
+        if let Some(p) = create_now {
+            match crate::book::init::init_project(&p) {
+                Ok(()) => match self.open_book(&p) {
+                    Ok(()) => {
+                        self.picker_error = None;
+                        self.show_book_picker = false;
+                    }
+                    Err(e) => {
+                        self.picker_error = Some(format!("scaffold OK but open failed: {e}"));
+                    }
+                },
+                Err(e) => {
+                    self.picker_error = Some(format!("create project: {e}"));
+                }
+            }
+        } else if let Some(p) = open_now {
+            match self.open_book(&p) {
+                Ok(()) => {
+                    self.picker_error = None;
+                    self.show_book_picker = false;
+                }
+                Err(e) => {
+                    self.picker_error = Some(format!("open book: {e}"));
+                }
             }
         }
         if close {
+            self.picker_error = None;
             self.show_book_picker = false;
         }
     }
@@ -576,6 +679,11 @@ impl CkWriterApp {
         let mut confirm = false;
         let mut cancel = false;
 
+        let manuscript_folders: Vec<String> = self
+            .book
+            .as_ref()
+            .map(|b| b.config.manuscript_folders.clone())
+            .unwrap_or_default();
         egui::Window::new("New chapter")
             .collapsible(false)
             .resizable(false)
@@ -585,8 +693,8 @@ impl CkWriterApp {
                 egui::ComboBox::from_id_salt("new-chapter-folder")
                     .selected_text(&dlg.folder)
                     .show_ui(ui, |ui| {
-                        for f in crate::book::manuscript::MANAGED_FOLDERS {
-                            ui.selectable_value(&mut dlg.folder, (*f).to_string(), *f);
+                        for f in &manuscript_folders {
+                            ui.selectable_value(&mut dlg.folder, f.clone(), f);
                         }
                     });
                 ui.label("Title:");

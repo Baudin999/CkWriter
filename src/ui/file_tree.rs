@@ -1,5 +1,5 @@
 use crate::app::CkWriterApp;
-use crate::book::manuscript::{self, ChapterRef};
+use crate::book::manuscript::ChapterRef;
 use crate::book::tree::FileNode;
 use crate::book::Chapter;
 use crate::icons;
@@ -477,7 +477,12 @@ fn apply_pending(app: &mut CkWriterApp, pending: PendingActions) {
         }
     }
     if pending.open_new_chapter {
-        app.new_chapter_dialog = Some(crate::app::NewChapterDialog::default());
+        let folders = app
+            .book
+            .as_ref()
+            .map(|b| b.config.manuscript_folders.clone())
+            .unwrap_or_default();
+        app.new_chapter_dialog = Some(crate::app::NewChapterDialog::new(&folders));
     }
     if let Some(new_order) = pending.reorder {
         if let Err(e) = app.reorder_manuscript(new_order) {
@@ -506,7 +511,6 @@ fn apply_pending(app: &mut CkWriterApp, pending: PendingActions) {
     if let Some(p) = pending.open {
         app.request_open_chapter(p);
     }
-    let _ = manuscript::MANAGED_FOLDERS; // keep the import live in release builds
 }
 
 #[cfg(test)]

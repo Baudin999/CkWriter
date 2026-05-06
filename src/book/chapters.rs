@@ -22,8 +22,7 @@
 
 use crate::book::latex;
 use crate::book::manuscript::{
-    self, camel_case, derive_filename, derive_include_path, strip_number_prefix, ChapterRef,
-    Manuscript,
+    camel_case, derive_filename, derive_include_path, strip_number_prefix, ChapterRef, Manuscript,
 };
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -95,15 +94,15 @@ pub fn scan_folder(root: &Path, folder: &str) -> HashMap<String, PathBuf> {
 /// performs zero file system writes. Two-phase rename via a `__staging_*`
 /// intermediate avoids collisions when files swap numbers (Wua at 010 wants
 /// 020 while Arrival at 020 wants 010).
-pub fn normalize(root: &Path, manuscript: &Manuscript) -> Result<()> {
+pub fn normalize(root: &Path, manuscript: &Manuscript, folders: &[String]) -> Result<()> {
     // Plan: for every name in every managed folder, what file path it should
     // end up at. Manuscript entries are numbered by their folder-position;
     // orphans drop the number entirely.
     let mut planned: Vec<(PathBuf, PathBuf)> = Vec::new(); // (current, target)
     let mut missing: Vec<ChapterRef> = Vec::new();
 
-    for folder in manuscript::MANAGED_FOLDERS {
-        let folder_str = (*folder).to_string();
+    for folder in folders {
+        let folder_str = folder.clone();
         let scan = scan_folder(root, folder);
 
         // Manuscript chapters in this folder, in manuscript order.
@@ -215,8 +214,13 @@ pub fn write_main_tex(root: &Path, main_tex_name: &str, manuscript: &Manuscript)
 /// One-shot: update manuscript.json + main.tex + filenames after `manuscript`
 /// has been mutated by the caller. Every public op below routes through
 /// here so the three pieces stay in lockstep.
-pub fn commit(root: &Path, main_tex_name: &str, manuscript: &Manuscript) -> Result<()> {
-    normalize(root, manuscript)?;
+pub fn commit(
+    root: &Path,
+    main_tex_name: &str,
+    manuscript: &Manuscript,
+    folders: &[String],
+) -> Result<()> {
+    normalize(root, manuscript, folders)?;
     manuscript.save(root)?;
     write_main_tex(root, main_tex_name, manuscript)?;
     Ok(())
@@ -249,10 +253,11 @@ pub fn add_chapter(
     root: &Path,
     main_tex_name: &str,
     manuscript: &mut Manuscript,
+    folders: &[String],
     folder: &str,
     title: &str,
 ) -> Result<ChapterRef> {
-    if !manuscript::MANAGED_FOLDERS.contains(&folder) {
+    if !folders.iter().any(|f| f == folder) {
         return Err(anyhow!("unmanaged folder: {folder}"));
     }
     let trimmed = title.trim();
@@ -284,7 +289,7 @@ pub fn add_chapter(
         name,
     };
     manuscript.chapters.push(entry.clone());
-    commit(root, main_tex_name, manuscript)?;
+    commit(root, main_tex_name, manuscript, folders)?;
     Ok(entry)
 }
 
@@ -294,6 +299,7 @@ pub fn delete_chapter(
     root: &Path,
     main_tex_name: &str,
     manuscript: &mut Manuscript,
+    folders: &[String],
     folder: &str,
     name: &str,
 ) -> Result<()> {
@@ -305,7 +311,7 @@ pub fn delete_chapter(
     manuscript
         .chapters
         .retain(|c| !(c.folder == folder && c.name == name));
-    commit(root, main_tex_name, manuscript)?;
+    commit(root, main_tex_name, manuscript, folders)?;
     Ok(())
 }
 
@@ -315,6 +321,7 @@ pub fn exclude_chapter(
     root: &Path,
     main_tex_name: &str,
     manuscript: &mut Manuscript,
+    folders: &[String],
     folder: &str,
     name: &str,
 ) -> Result<()> {
@@ -328,7 +335,7 @@ pub fn exclude_chapter(
     manuscript
         .chapters
         .retain(|c| !(c.folder == folder && c.name == name));
-    commit(root, main_tex_name, manuscript)?;
+    commit(root, main_tex_name, manuscript, folders)?;
     Ok(())
 }
 
@@ -338,6 +345,7 @@ pub fn include_chapter(
     root: &Path,
     main_tex_name: &str,
     manuscript: &mut Manuscript,
+    folders: &[String],
     folder: &str,
     name: &str,
 ) -> Result<()> {
@@ -351,7 +359,7 @@ pub fn include_chapter(
         folder: folder.to_string(),
         name: name.to_string(),
     });
-    commit(root, main_tex_name, manuscript)?;
+    commit(root, main_tex_name, manuscript, folders)?;
     Ok(())
 }
 
@@ -362,6 +370,7 @@ pub fn reorder_manuscript(
     root: &Path,
     main_tex_name: &str,
     manuscript: &mut Manuscript,
+    folders: &[String],
     new_order: Vec<ChapterRef>,
 ) -> Result<()> {
     if new_order.len() != manuscript.chapters.len() {
@@ -381,15 +390,19 @@ pub fn reorder_manuscript(
         }
     }
     manuscript.chapters = new_order;
-    commit(root, main_tex_name, manuscript)?;
+    commit(root, main_tex_name, manuscript, folders)?;
     Ok(())
 }
 
 /// Inventory used by the file-tree UI: every chapter known under each
 /// managed folder, split into manuscript-vs-orphan and sorted appropriately.
-pub fn list_folders(root: &Path, manuscript: &Manuscript) -> HashMap<String, FolderListing> {
+pub fn list_folders(
+    root: &Path,
+    manuscript: &Manuscript,
+    folders: &[String],
+) -> HashMap<String, FolderListing> {
     let mut out: HashMap<String, FolderListing> = HashMap::new();
-    for folder in manuscript::MANAGED_FOLDERS {
+    for folder in folders {
         let scan = scan_folder(root, folder);
         let mut listing = FolderListing::default();
 
@@ -414,7 +427,7 @@ pub fn list_folders(root: &Path, manuscript: &Manuscript) -> HashMap<String, Fol
             });
         }
 
-        out.insert((*folder).to_string(), listing);
+        out.insert(folder.clone(), listing);
     }
     out
 }
@@ -422,6 +435,13 @@ pub fn list_folders(root: &Path, manuscript: &Manuscript) -> HashMap<String, Fol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Standard manuscript folders used by every chapter-ops test. Matches
+    /// the historical `MANAGED_FOLDERS` const so the assertions remain
+    /// meaningful after #0033 made the list per-book.
+    fn folders() -> Vec<String> {
+        vec!["Ancient".to_string(), "Modern".to_string()]
+    }
 
     fn tempdir() -> PathBuf {
         // Per-process atomic counter so parallel cargo test runs can't collide
@@ -439,8 +459,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
-        for f in manuscript::MANAGED_FOLDERS {
-            std::fs::create_dir_all(p.join(f)).unwrap();
+        for f in folders() {
+            std::fs::create_dir_all(p.join(&f)).unwrap();
         }
         std::fs::write(
             p.join("main.tex"),
@@ -454,8 +474,15 @@ mod tests {
     fn add_creates_file_with_chapter_skeleton() {
         let root = tempdir();
         let mut m = Manuscript::default();
-        let entry =
-            add_chapter(&root, "main.tex", &mut m, "Ancient", "First Encounter").expect("add");
+        let entry = add_chapter(
+            &root,
+            "main.tex",
+            &mut m,
+            &folders(),
+            "Ancient",
+            "First Encounter",
+        )
+        .expect("add");
         assert_eq!(entry.name, "FirstEncounter");
         let path = root.join("Ancient/010_FirstEncounter.tex");
         assert!(path.exists(), "{} should exist", path.display());
@@ -471,8 +498,9 @@ mod tests {
     fn add_with_collision_picks_unique_name() {
         let root = tempdir();
         let mut m = Manuscript::default();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
-        let second = add_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").expect("second add");
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
+        let second = add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua")
+            .expect("second add");
         assert_eq!(second.name, "Wua2");
         assert!(root.join("Ancient/010_Wua.tex").exists());
         assert!(root.join("Ancient/020_Wua2.tex").exists());
@@ -482,11 +510,19 @@ mod tests {
     fn delete_removes_file_and_compacts_numbers() {
         let root = tempdir();
         let mut m = Manuscript::default();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Arrival").unwrap();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "FirstEncounter").unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Arrival").unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
+        add_chapter(
+            &root,
+            "main.tex",
+            &mut m,
+            &folders(),
+            "Ancient",
+            "FirstEncounter",
+        )
+        .unwrap();
 
-        delete_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
+        delete_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
         assert!(!root.join("Ancient/020_Wua.tex").exists());
         // FirstEncounter slides up from 030 → 020.
         assert!(root.join("Ancient/010_Arrival.tex").exists());
@@ -498,9 +534,9 @@ mod tests {
     fn exclude_drops_number_prefix_then_include_restores_it() {
         let root = tempdir();
         let mut m = Manuscript::default();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Arrival").unwrap();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
-        exclude_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Arrival").unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
+        exclude_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
 
         // Wua keeps its file but loses its number.
         assert!(!root.join("Ancient/020_Wua.tex").exists());
@@ -511,7 +547,7 @@ mod tests {
         let main_tex = std::fs::read_to_string(root.join("main.tex")).unwrap();
         assert!(!main_tex.contains("Wua"));
 
-        include_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
+        include_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
         assert!(!root.join("Ancient/Wua.tex").exists());
         assert!(root.join("Ancient/020_Wua.tex").exists());
     }
@@ -520,9 +556,17 @@ mod tests {
     fn reorder_renumbers_files_per_folder() {
         let root = tempdir();
         let mut m = Manuscript::default();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Arrival").unwrap();
-        add_chapter(&root, "main.tex", &mut m, "Modern", "NewYorkCity").unwrap();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Wua").unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Arrival").unwrap();
+        add_chapter(
+            &root,
+            "main.tex",
+            &mut m,
+            &folders(),
+            "Modern",
+            "NewYorkCity",
+        )
+        .unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Wua").unwrap();
         // Now: Ancient = [Arrival(010), Wua(020)], Modern = [NewYorkCity(010)].
 
         // Swap the two Ancients.
@@ -540,7 +584,7 @@ mod tests {
                 name: "Arrival".into(),
             },
         ];
-        reorder_manuscript(&root, "main.tex", &mut m, new_order).unwrap();
+        reorder_manuscript(&root, "main.tex", &mut m, &folders(), new_order).unwrap();
 
         // Ancient slice is now Wua(010), Arrival(020).
         assert!(root.join("Ancient/010_Wua.tex").exists());
@@ -566,8 +610,16 @@ mod tests {
     fn normalize_is_idempotent() {
         let root = tempdir();
         let mut m = Manuscript::default();
-        add_chapter(&root, "main.tex", &mut m, "Ancient", "Arrival").unwrap();
-        add_chapter(&root, "main.tex", &mut m, "Modern", "NewYorkCity").unwrap();
+        add_chapter(&root, "main.tex", &mut m, &folders(), "Ancient", "Arrival").unwrap();
+        add_chapter(
+            &root,
+            "main.tex",
+            &mut m,
+            &folders(),
+            "Modern",
+            "NewYorkCity",
+        )
+        .unwrap();
 
         // Snapshot dir-listing.
         let snap = |dir: &Path| {
@@ -582,8 +634,8 @@ mod tests {
         let before_a = snap(&root.join("Ancient"));
         let before_m = snap(&root.join("Modern"));
 
-        normalize(&root, &m).unwrap();
-        normalize(&root, &m).unwrap();
+        normalize(&root, &m, &folders()).unwrap();
+        normalize(&root, &m, &folders()).unwrap();
 
         assert_eq!(snap(&root.join("Ancient")), before_a);
         assert_eq!(snap(&root.join("Modern")), before_m);
@@ -613,7 +665,7 @@ mod tests {
                 },
             ],
         };
-        normalize(&root, &m).unwrap();
+        normalize(&root, &m, &folders()).unwrap();
 
         assert!(root.join("Ancient/010_Arrival.tex").exists());
         assert!(root.join("Ancient/020_Wua.tex").exists());
@@ -673,19 +725,20 @@ mod tests {
         // Simulate the migration step Book::open does: seed manuscript from
         // main.tex includes, then commit (normalize + save + main.tex sync).
         let mut m = Manuscript::default();
+        let folders = folders();
         for inc in latex::parse_includes(main_tex_src) {
             let Some((folder, stem)) = inc.split_once('/') else {
                 continue;
             };
-            if !manuscript::MANAGED_FOLDERS.contains(&folder) {
+            if !folders.iter().any(|f| f == folder) {
                 continue;
             }
             m.chapters.push(ChapterRef {
                 folder: folder.to_string(),
-                name: manuscript::strip_number_prefix(stem).to_string(),
+                name: strip_number_prefix(stem).to_string(),
             });
         }
-        commit(&root, "main.tex", &m).unwrap();
+        commit(&root, "main.tex", &m, &folders).unwrap();
 
         // Manuscript chapters get stride-10 numbers based on folder position.
         assert!(root.join("Ancient/010_Arrival.tex").exists());
@@ -715,7 +768,7 @@ mod tests {
 
         // Idempotent: running commit again produces no changes on disk.
         let before = std::fs::read_to_string(root.join("main.tex")).unwrap();
-        commit(&root, "main.tex", &m).unwrap();
+        commit(&root, "main.tex", &m, &folders).unwrap();
         let after = std::fs::read_to_string(root.join("main.tex")).unwrap();
         assert_eq!(before, after);
     }

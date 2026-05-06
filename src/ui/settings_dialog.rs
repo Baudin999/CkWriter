@@ -200,12 +200,64 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
                 changed = true;
             }
 
+            // === Project folders (per-book; #0033) ===
+            // Only renders when a book is open, since these settings live in
+            // the book's `Info/index.json`, not in app-wide settings.toml.
+            let mut project_changed = false;
+            if let Some(book) = app.book.as_mut() {
+                ui.add_space(12.0);
+                ui.separator();
+                ui.label(
+                    RichText::new("Project folders")
+                        .small()
+                        .strong()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.label(
+                    RichText::new(
+                        "Saved into the open book's Info/index.json. Changes apply on Save.",
+                    )
+                    .small()
+                    .color(theme::TEXT_MUTED),
+                );
+
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("manuscript folders (chapter directories)")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                project_changed |= edit_string_list(
+                    ui,
+                    "settings_manuscript_folders",
+                    "Manuscript",
+                    &mut book.config.manuscript_folders,
+                );
+
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("authors folders (character JSON directories)")
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                project_changed |= edit_string_list(
+                    ui,
+                    "settings_authors_folders",
+                    "Info/Characters",
+                    &mut book.config.authors_folders,
+                );
+            }
+
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Close").clicked() {
                     close = true;
                 }
             });
+
+            if project_changed {
+                app.project_folders_dirty = true;
+            }
         });
 
     if changed {
@@ -216,6 +268,64 @@ pub fn show(app: &mut CkWriterApp, ctx: &egui::Context) {
             let _ = app.settings.save();
             app.settings_dirty = false;
         }
+        if app.project_folders_dirty {
+            // Persist Info/index.json from the in-memory config the user just
+            // edited, then re-open the book so the file tree, manuscript
+            // commit, and entity store all pick up the new folder lists.
+            if let Some(book_root) = app.book.as_ref().map(|b| b.root.clone()) {
+                if let Some(book) = app.book.as_ref() {
+                    if let Err(e) = book.config.save(&book.root) {
+                        log::warn!("project config save failed: {e}");
+                    }
+                }
+                if let Err(e) = app.open_book(&book_root) {
+                    log::warn!("project config reload failed: {e:#}");
+                }
+            }
+            app.project_folders_dirty = false;
+        }
         app.show_settings = false;
     }
+}
+
+/// Editor for a `Vec<String>` list. Each row is a textbox + `–` button; a
+/// trailing row holds an `+ Add` button. Returns `true` whenever the list
+/// gained, lost, or had an item edited *and* the textbox lost focus —
+/// so callers can defer the persist+reload until the user is done typing.
+fn edit_string_list(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    placeholder: &str,
+    list: &mut Vec<String>,
+) -> bool {
+    let mut changed = false;
+    let mut remove: Option<usize> = None;
+    for (i, entry) in list.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(entry)
+                    .id_salt(format!("{id_salt}-{i}"))
+                    .hint_text(placeholder)
+                    .desired_width(360.0),
+            );
+            if resp.lost_focus() && resp.changed() {
+                changed = true;
+            }
+            if ui.small_button("–").on_hover_text("Remove").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        list.remove(i);
+        changed = true;
+    }
+    if ui
+        .small_button(format!("+ Add {}", placeholder.to_lowercase()))
+        .clicked()
+    {
+        list.push(String::new());
+        changed = true;
+    }
+    changed
 }

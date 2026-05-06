@@ -221,10 +221,12 @@ impl super::CkWriterApp {
             return Err(anyhow::anyhow!("no book open"));
         };
         let main_tex_name = book.config.main_tex.clone();
+        let manuscript_folders = book.config.manuscript_folders.clone();
         let entry = chapter_ops::add_chapter(
             &book.root.clone(),
             &main_tex_name,
             &mut book.manuscript,
+            &manuscript_folders,
             folder,
             title,
         )?;
@@ -254,8 +256,16 @@ impl super::CkWriterApp {
             return Err(anyhow::anyhow!("no book open"));
         };
         let main_tex_name = book.config.main_tex.clone();
+        let manuscript_folders = book.config.manuscript_folders.clone();
         let root = book.root.clone();
-        chapter_ops::delete_chapter(&root, &main_tex_name, &mut book.manuscript, folder, name)?;
+        chapter_ops::delete_chapter(
+            &root,
+            &main_tex_name,
+            &mut book.manuscript,
+            &manuscript_folders,
+            folder,
+            name,
+        )?;
         book.reload_chapters();
         if let Some(ch) = self.current_chapter.as_ref() {
             if ch.folder == folder && ch.name == name {
@@ -278,8 +288,16 @@ impl super::CkWriterApp {
             return Err(anyhow::anyhow!("no book open"));
         };
         let main_tex_name = book.config.main_tex.clone();
+        let manuscript_folders = book.config.manuscript_folders.clone();
         let root = book.root.clone();
-        chapter_ops::exclude_chapter(&root, &main_tex_name, &mut book.manuscript, folder, name)?;
+        chapter_ops::exclude_chapter(
+            &root,
+            &main_tex_name,
+            &mut book.manuscript,
+            &manuscript_folders,
+            folder,
+            name,
+        )?;
         book.reload_chapters();
         // The current chapter's filename just changed (number stripped); resync
         // its file_path so subsequent saves go to the right file.
@@ -296,8 +314,16 @@ impl super::CkWriterApp {
             return Err(anyhow::anyhow!("no book open"));
         };
         let main_tex_name = book.config.main_tex.clone();
+        let manuscript_folders = book.config.manuscript_folders.clone();
         let root = book.root.clone();
-        chapter_ops::include_chapter(&root, &main_tex_name, &mut book.manuscript, folder, name)?;
+        chapter_ops::include_chapter(
+            &root,
+            &main_tex_name,
+            &mut book.manuscript,
+            &manuscript_folders,
+            folder,
+            name,
+        )?;
         book.reload_chapters();
         self.resync_current_chapter();
         Ok(())
@@ -313,8 +339,15 @@ impl super::CkWriterApp {
             return Err(anyhow::anyhow!("no book open"));
         };
         let main_tex_name = book.config.main_tex.clone();
+        let manuscript_folders = book.config.manuscript_folders.clone();
         let root = book.root.clone();
-        chapter_ops::reorder_manuscript(&root, &main_tex_name, &mut book.manuscript, new_order)?;
+        chapter_ops::reorder_manuscript(
+            &root,
+            &main_tex_name,
+            &mut book.manuscript,
+            &manuscript_folders,
+            new_order,
+        )?;
         book.reload_chapters();
         self.resync_current_chapter();
         Ok(())
@@ -397,7 +430,8 @@ impl super::CkWriterApp {
     pub fn run_import(&mut self) {
         let Some(book) = &mut self.book else { return };
         let root = book.root.clone();
-        match crate::import::import_personae(&root) {
+        let authors_folders = book.config.authors_folders.clone();
+        match crate::import::import_personae(&root, &authors_folders) {
             Ok(n) => {
                 self.import_status = Some(format!("imported {n} characters from Personae.txt"));
                 book.reload_entities();
